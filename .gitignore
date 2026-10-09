@@ -4,3 +4,11 @@ build/
 .swiftpm/
 .qoder/settings.local.json
 *.log
+
+# Local API settings and reading materials.
+.env
+.env.*
+!.env.example
+*.pdf
+*.etr.json
+*.etr.json.bak*

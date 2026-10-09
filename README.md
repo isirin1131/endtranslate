@@ -2,6 +2,8 @@
 
 在 Mac 上边读边译 PDF。拖拽框选英文段落，确认后由视觉模型翻译，中文译文插在原文上方。支持数学公式、编辑译文、自动保存和导出。
 
+A native macOS PDF reader with inline translation, LaTeX math rendering, and annotated PDF export. Built with SwiftUI, AppKit, and PDFKit.
+
 ## 环境
 
 - macOS 14 或更新版本。
@@ -12,6 +14,22 @@
 应用不依赖第三方 Swift 包，也不需要完整 Xcode。Typst 首次排版可能需要下载 `@preview/mitex:0.2.7`。
 
 ## 构建和运行
+
+先安装 Command Line Tools；需要公式排版时，使用 Homebrew 安装 Typst：
+
+```sh
+xcode-select --install
+brew install typst
+```
+
+获取源码：
+
+```sh
+gh repo clone isirin1131/endtranslate
+cd endtranslate
+```
+
+编译并打开 PDF：
 
 ```sh
 swift build
@@ -38,6 +56,8 @@ zsh scripts/make-app.sh
 
 如果翻译出现 HTTP 401，打开设置，核对 Base URL 和 API Key 是否属于同一服务商，并重新填写有效的 Key；HTTP 403 则需要检查模型权限或账户限制。先用“测试连接”验证，再点击失败的译文框重试。Key 只需填在应用中。
 
+确认翻译后，应用会把选区截图发送到你配置的 API 服务。PDF 和译注在本机保存；API 服务的费用和数据处理规则由所选服务商决定。
+
 ## 译注保存
 
 例如 `paper.pdf` 的译注保存在同目录的 `paper.etr.json`。移动或备份阅读资料时，把这两个文件放在一起。API Key 保存在 macOS 钥匙串，不写入译注文件。
@@ -57,3 +77,7 @@ zsh scripts/test.sh
 脚本自动处理 Command Line Tools 的 Testing 框架路径。测试使用临时文件和合成 PDF，不调用翻译 API，也不依赖 Typst。覆盖保存/删除失败与重试、损坏文件备份、PDF 校验、纯文本与矢量导出，以及错误/纯文本在不同缩放下的绘制方向与字号。权限测试需要普通用户运行；root 运行时会跳过这些用例。
 
 完整设计和历史实现说明见 [PLAN.md](PLAN.md)。
+
+## 许可证
+
+源码使用 [MIT License](LICENSE)。Typst 和 mitex 作为外部工具使用，遵循各自的许可证。

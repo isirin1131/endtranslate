@@ -1,8 +1,8 @@
 # EndTranslate — 边读边译的 PDF 翻译标注 Mac 应用（Swift 原生版）
 
-> 本文档是完整的实现规格。按 M1→M5 阶段顺序实现。
+> 本文档记录早期规格、设计决策和实现历史。使用与构建方法以 README 和当前代码为准。
 > v2：技术栈从 Tauri+Web 改为 Swift 原生（用户要求：不做几百 MB 的 web 封包，只做 Mac）。
-> v3：公式渲染从 SwiftMath 改为调用本机 typst CLI + mitex（用户本人日常用 typst；不考虑分发给其他用户）。
+> v3：公式渲染从 SwiftMath 改为调用本机 typst CLI + mitex，Typst 由使用者独立安装。
 
 ## 背景与核心理念
 
@@ -20,7 +20,7 @@ BabelDoc / pdf2zh 等工具解析 PDF 内部排版结构再重排，排版问题
 
 - **Swift 5.9 / SwiftUI + AppKit**，SwiftPM 构建（Command Line Tools 即可，无需完整 Xcode）
 - **PDFKit**：PDF 渲染、滚动缩放、坐标转换、标注、导出（替代 pdf.js / pdf-lib）
-- **本机 typst CLI + mitex**（M4 引入）：LaTeX → typst math → PNG。查找顺序：`/usr/bin/env typst` → `/opt/homebrew/bin/typst` → `/usr/local/bin/typst`；不考虑分发，本机已装 typst 0.15.1
+- **本机 typst CLI + mitex**（M4 引入）：正文与公式一起排版为矢量 PDF。查找顺序：`/usr/bin/env typst` → `/opt/homebrew/bin/typst` → `/usr/local/bin/typst`；已使用 typst 0.15.1 验证。
 - **URLSession**：OpenAI 兼容视觉 API
 - **Codable**：sidecar JSON
 - 本体无二进制依赖，产物 ~10MB 级
@@ -150,7 +150,7 @@ struct Sidecar: Codable {
 - 自动回归测试使用 Swift Testing；`zsh scripts/test.sh` 兼容仅装 Command Line Tools 的环境。使用方法见 `README.md`。
 - v0.6.1 验证：17 项自动回归通过；独立应用窗口内模拟只读目录，确认保存错误持续显示、关闭/退出/切换文件均被阻止，恢复权限后重试保存的内容与编辑稿完全一致，窗口随后正常关闭。发布构建和 `.app` 打包通过。真实翻译 API 与 500 页文档性能仍需单独验收。
 - v0.6.2 修正错误/纯文本的方向、字号与内边距缩放；401 与 403 分别提示认证与权限问题，配置类失败提供“打开设置”入口。钥匙串服务按 bundle ID 隔离，正式应用继续使用原来的 `app.endtranslate` 条目。
-- v0.6.2 验证：19 项自动回归通过，其中错误和纯文本各比较 50%、100%、200% 缩放的屏幕与 PDF 绘制像素；独立原生窗口确认实际大小和适应宽度下文字正向、字号同步，模拟 401 后可打开设置、查看 403 提示，服务恢复后测试连接及原选区重试成功，译文已保存。模拟流程仅使用合成 PDF、本机接口和独立钥匙串；发布构建与签名检查通过。真实服务最近返回 Key 无效，仍需在应用内填写对应服务商的有效 Key 才能验证真实翻译。
+- v0.6.2 验证：19 项自动回归通过，其中错误和纯文本各比较 50%、100%、200% 缩放的屏幕与 PDF 绘制像素；独立原生窗口确认实际大小和适应宽度下文字正向、字号同步，模拟 401 后可打开设置、查看 403 提示，服务恢复后测试连接及原选区重试成功，译文已保存。模拟流程仅使用合成 PDF、本机接口和独立钥匙串；发布构建与签名检查通过。真实 API 需使用对应服务商的有效 Key 独立验证。
 
 ### 手动验收
 
