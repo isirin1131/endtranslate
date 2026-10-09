@@ -1,0 +1,265 @@
+import SwiftUI
+import PDFKit
+import UniformTypeIdentifiers
+
+struct ContentView: View {
+    @StateObject private var model = PDFViewModel()
+    @ObservedObject private var settings = AppSettings.shared
+    @Environment(\.undoManager) private var undoManager
+    @Environment(\.openSettings) private var openSettings
+
+    var body: some View {
+        PDFDocumentView(model: model)
+            .overlay {
+                if model.document == nil {
+                    EmptyStateView(model: model, settings: settings)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                StatusPill(model: model)
+                    .padding(.bottom, 18)
+            }
+            .navigationTitle(model.document == nil ? "EndTranslate" : model.fileName)
+            .navigationSubtitle(model.pageLabel)
+            .toolbar { toolbar }
+            .sheet(item: $model.editing) { session in
+                AnnotationEditorView(session: session, model: model)
+            }
+            .focusedSceneObject(model)
+            .onAppear {
+                model.undoManager = undoManager
+                if let url = OpenRequests.takePending() {
+                    model.open(url: url)
+                } else {
+                    model.restoreLastSession()
+                }
+            }
+            .onChange(of: undoManager) { model.undoManager = undoManager }
+            .onDisappear { model.flush() }
+            .onReceive(NotificationCenter.default.publisher(for: OpenRequests.notification)) { _ in
+                if let url = OpenRequests.takePending() { model.open(url: url) }
+            }
+            .onChange(of: model.settingsRequest) { openSettings() }
+    }
+
+    @ToolbarContentBuilder
+    private var toolbar: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Button { model.openPanel() } label: {
+                Label("打开", systemImage: "doc.badge.plus")
+            }
+            .help("打开 PDF（⌘O）")
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
+            ControlGroup {
+                Button { model.zoomOut() } label: {
+                    Label("缩小", systemImage: "minus.magnifyingglass")
+                }
+                .help("缩小（⌘-）")
+                Button { model.zoomIn() } label: {
+                    Label("放大", systemImage: "plus.magnifyingglass")
+                }
+                .help("放大（⌘=）")
+            }
+            .disabled(model.document == nil)
+
+            Button { model.toggleAllTranslations() } label: {
+                Label("收起/展开译文", systemImage: "translate")
+            }
+            .help("收起或展开全部译文（⇧⌘T）")
+            .disabled(model.document == nil)
+
+            Button { model.exportAnnotatedPDF() } label: {
+                Label("导出", systemImage: "square.and.arrow.up")
+            }
+            .help("导出带译文的 PDF（⇧⌘E）")
+            .disabled(model.document == nil)
+
+            SettingsLink {
+                Label("设置", systemImage: "gearshape")
+            }
+            .help("翻译服务设置（⌘,）")
+        }
+    }
+}
+
+/// First screen: what the app does, how to start, and where you left off.
+private struct EmptyStateView: View {
+    @ObservedObject var model: PDFViewModel
+    @ObservedObject var settings: AppSettings
+    @State private var dropTargeted = false
+
+    var body: some View {
+        VStack(spacing: 22) {
+            Image(systemName: "text.viewfinder")
+                .font(.system(size: 56, weight: .thin))
+                .foregroundStyle(dropTargeted ? Color.accentColor : Color.secondary)
+                .symbolEffect(.bounce, value: dropTargeted)
+
+            VStack(spacing: 6) {
+                Text("拖入 PDF 开始阅读")
+                    .font(.title2.weight(.semibold))
+                Text("在页面上框选任意段落，译文会出现在原文上方")
+                    .foregroundStyle(.secondary)
+            }
+
+            Button {
+                model.openPanel()
+            } label: {
+                Text("打开 PDF…").frame(minWidth: 110)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+
+            HStack(spacing: 18) {
+                Tip(symbol: "rectangle.dashed", text: "拖拽框选 → 翻译")
+                Tip(symbol: "cursorarrow.click", text: "单击切换原文")
+                Tip(symbol: "cursorarrow.click.2", text: "双击编辑译文")
+                Tip(symbol: "option", text: "⌥ 拖拽可在译文上框选")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            if !settings.isConfigured {
+                SettingsLink {
+                    Label("尚未配置翻译服务，前往设置", systemImage: "exclamationmark.circle")
+                }
+                .buttonStyle(.link)
+            }
+
+            if !model.recentFiles.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("最近打开")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .padding(.leading, 8)
+                        .padding(.bottom, 4)
+                    ForEach(model.recentFiles.prefix(5), id: \.self) { url in
+                        RecentRow(url: url) { model.open(url: url) }
+                    }
+                }
+                .frame(width: 360)
+                .padding(.top, 6)
+            }
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.background)
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(Color.accentColor, lineWidth: 3)
+                    .padding(8)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url, url.pathExtension.lowercased() == "pdf" else { return }
+                Task { @MainActor in model.open(url: url) }
+            }
+            return true
+        }
+    }
+}
+
+private struct Tip: View {
+    let symbol: String
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: symbol)
+            Text(text)
+        }
+    }
+}
+
+private struct RecentRow: View {
+    let url: URL
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
+                    .resizable()
+                    .frame(width: 20, height: 20)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(url.deletingPathExtension().lastPathComponent)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(url.deletingLastPathComponent().path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(hovering ? Color.primary.opacity(0.07) : .clear)
+            )
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(url.path)
+    }
+}
+
+/// Bottom-center capsule: progress while translating, otherwise the latest toast.
+private struct StatusPill: View {
+    @ObservedObject var model: PDFViewModel
+
+    var body: some View {
+        Group {
+            if let toast = model.toast {
+                HStack(spacing: 8) {
+                    Image(systemName: toast.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .foregroundStyle(toast.isError ? Color.orange : Color.green)
+                    Text(toast.message)
+                        .lineLimit(2)
+                    if let title = toast.actionTitle {
+                        Button(title) {
+                            toast.action?()
+                            model.dismissToast()
+                        }
+                        .buttonStyle(.link)
+                    }
+                }
+                .id(toast.id)
+                .pill()
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if model.activeTranslations > 0 {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(model.activeTranslations == 1 ? "正在翻译…" : "正在翻译 \(model.activeTranslations) 处…")
+                        .monospacedDigit()
+                }
+                .pill()
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(duration: 0.3), value: model.toast?.id)
+        .animation(.spring(duration: 0.3), value: model.activeTranslations > 0)
+    }
+}
+
+private extension View {
+    func pill() -> some View {
+        self
+            .font(.callout)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.regularMaterial, in: Capsule())
+            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
+            .frame(maxWidth: 560)
+    }
+}
