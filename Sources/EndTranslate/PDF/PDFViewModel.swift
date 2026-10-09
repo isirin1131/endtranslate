@@ -515,6 +515,12 @@ final class PDFViewModel: ObservableObject {
                 let message = LLMClient.describe(error)
                 annotation.status = .failed(message)
                 relayout(page: model.page, anchor: anchor(for: model))
+                if let error = error as? LLMClient.LLMError, error.needsSettingsReview {
+                    show("请检查翻译服务设置，修改后点击失败的译文框重试", isError: true,
+                         actionTitle: "打开设置") { [weak self] in
+                        self?.settingsRequest += 1
+                    }
+                }
                 Log.write("translation failed: \(error)")
             }
         }

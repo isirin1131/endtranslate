@@ -24,7 +24,8 @@ struct LLMClient {
             case .http(let code, let body):
                 let detail = Self.serverMessage(body).map { "：\($0)" } ?? ""
                 switch code {
-                case 401, 403: return "API Key 无效或无权限（HTTP \(code)）"
+                case 401: return "API Key 认证失败（HTTP 401），请在设置中核对服务地址和对应的 Key"
+                case 403: return "服务拒绝访问（HTTP 403），请检查模型权限或账户限制"
                 case 404: return "接口地址或模型不存在（HTTP 404）\(detail)"
                 case 413: return "选区图片过大（HTTP 413）"
                 case 429: return "请求过于频繁或额度不足（HTTP 429）"
@@ -32,6 +33,13 @@ struct LLMClient {
                 default: return "HTTP \(code)\(detail)"
                 }
             case .emptyResponse: return "响应为空或格式不符"
+            }
+        }
+
+        var needsSettingsReview: Bool {
+            switch self {
+            case .notConfigured, .badURL, .http(401, _), .http(403, _), .http(404, _): return true
+            default: return false
             }
         }
 

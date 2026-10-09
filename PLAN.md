@@ -90,8 +90,8 @@ struct Sidecar: Codable {
 
 1. **PDFView 系统组件**：渲染/滚动/缩放/坐标转换全用 PDFKit 自带 API（`convert(_:to:)` / `convert(_:from:)`），不手写 dpr 换算。框选用加在 documentView 上的透明 overlay NSView。
 2. **标注模型与显示分离（M5 后定稿）**：`TranslationAnnotation` 仅作**模型载体**（bounds/rendered/status/showsOriginal），**不再 addAnnotation 到页面**；译文框由 `SelectionOverlay`（视口固定、覆盖 PDFView 的自绘 NSView）以**矢量**画进实时 Retina 上下文 → 任意缩放下都清晰，绕开 PDFKit 对自绘 annotation 的光栅化缓存（此前"贴到 PDF 上比预览糊"的根因）。`bounds` = 显示框，`model.rect` = 原始选区，框体位于选区上方（拼音标注位）。编辑：overlay 命中测试 → 单击切换原文/译文、双击弹编辑器。**已实验确认（2026-09-25）**：
-   - 文本必须用 **CoreText** 绘制：`context.textMatrix = .identity` + `CGPath(rect: 页面坐标)` + **不做任何 CTM 翻转**（翻转反而倒立）。`NSString.draw` 在 PDFView 显示路径与 `write(to:)` 生成 /AP 时依赖 `NSGraphicsContext.current`，会**静默丢字**。
-   - 刷新方式：`page.removeAnnotation` + `addAnnotation`。
+   - 文本使用 **CoreText** 绘制：`context.textMatrix = .identity`，并明确区分上下文方向。导出 PDF 的 y-up 上下文无需翻转；屏幕 overlay 的 y-down 上下文必须在文字框内反翻。文字布局和字号以 PDF pt 计算，再按页面缩放绘制。`NSString.draw` 在旧 PDFAnnotation 的显示与 /AP 生成路径中依赖 `NSGraphicsContext.current`，曾出现静默丢字。
+   - 刷新方式：`SelectionOverlay.requestInvalidate()`；不再向 PDF 页面添加自绘 annotation。
    - `PDFDocument.write(to:)` 在 CoreText 下已验证可用：矢量内容 + 译文文本 + **嵌入字体**（/FontFile*，含 CJK 子集）全部保留。
    - **但 M4 复测（2026-09-25）**：自绘内容若为**嵌套的 PDF 页**（`CGContextDrawPDFPage`），`write(to:)` 生成的 /AP 外观流会**错乱字形**（文本 operator 被重编码到错误的字体，位图/offscreen PDFView 两条显示路径正常）。→ **M5 导出改为自建 CGPDFContext 逐页扁平化**：`beginPDFPage` → `drawPDFPage(原页)`（矢量原样）→ 对每个标注 `drawPDFPage(typst 页)` 画到其 bounds。不经过 PDFKit 的 /AP 生成，也就不会重编码。
 3. **截图**：选区 rect（PDF pt）→ 用 PDFPage `draw(with:to:)` 直接绘制到 NSBitmapImageRep 位图上下文（像素尺寸确定，不受屏幕 Retina 缩放影响）→ PNG data。scale 3x，长边上限 2048px，超出按比例降低 scale（见 LLM 规格的 1024 token/图约束）。
@@ -99,7 +99,7 @@ struct Sidecar: Codable {
    - `MarkdownToTypst` 把 markdown-lite 转成 typst 源码：标题/列表/嵌套列表/表格/引用/分隔线/围栏代码/粗斜体/行内代码，行内与独立公式分别为 `#mi("...")` / `$ #mi("...") $`。文本中的 typst 特殊字符（`\ ` ` * _ # $ < > @ ~`）逐个转义（已实测）。
    - 页面 `#set page(width: <标注宽>pt, height: auto, margin: 4pt)`：编译结果页宽 == 标注宽、页高 == 需要的高度 → **标注高度不再靠估算**，`displayBounds` 直接用 `RenderedDoc.size`，需要压高度时按 √(h/H) 加宽重排（≤4 次）。
    - 渲染结果是**矢量**（内嵌 PingFang SC + NewCM + NewCM Math 字体），`RenderedDoc.draw` 以左上角对齐、等比缩放画进 bounds（放不下就裁切而非压扁）。
-   - **坐标系方向是反复踩坑点（已犯两次）**：`CGContextDrawPDFPage` 的页面是 y-up。`RenderedDoc.draw` 默认按 y-up 上下文（导出 CGPDFContext 路径）；屏幕 overlay 是 `isFlipped = true`（y-down），必须传 `yDown: true` 在 rect 内先 `scaleBy(1,-1)` 反翻，否则译文整页上下镜像。CoreText（`drawText`）相反，y-down 上下文才正。改任何绘制路径前先确认上下文方向。
+   - **坐标系方向**：PDF 页和 CoreText 都按 y-up 绘制。`RenderedDoc.draw` 与 `TranslationAnnotation.drawText` 默认用于 y-up 的导出上下文；屏幕 overlay 是 `isFlipped = true`（y-down），两者都必须传 `yDown: true` 在 rect 内反翻，否则文字上下镜像。`drawText` 还需传实际显示比例，并同步缩放内边距。此前文档称 CoreText 在 y-down 下无需翻转，这是错误的；回归测试比较两条路径在多个缩放级别的像素结果。
    - **已验证**：typst 0.15.1 + `@preview/mitex:0.2.7`（0.2.4 与 0.15 不兼容，报 `unknown variable: kai`）；12 个常见论文公式 12/12 成功，单次编译约 105ms。
    - **降级链**：① 整篇编译 → ② 失败时逐个公式单独试编译（结果按哈希缓存），把 mitex 拒绝的公式挑出来，仅这些以原样 LaTeX 文本重排整篇 → ③ 仍失败则整篇退化为去除 markdown 标记的纯文本（CoreText 绘制）。不崩溃、不整篇降级。
    - 缓存键 = `templateVersion | mitexVersion | width | fontSize | markdown` 的 sha256（改了模板必须 bump `templateVersion`，否则命中旧图）；磁盘缓存 `~/Library/Caches/EndTranslate/typst/<key>.pdf`，内存 LRU 200 条，14 天未用清理。
@@ -149,6 +149,8 @@ struct Sidecar: Codable {
 - 打开 PDF 的哈希准备期间保留待确认选区，加载完成后再允许创建译注；异步回调按文档会话检查，切换文件清空撤销历史。
 - 自动回归测试使用 Swift Testing；`zsh scripts/test.sh` 兼容仅装 Command Line Tools 的环境。使用方法见 `README.md`。
 - v0.6.1 验证：17 项自动回归通过；独立应用窗口内模拟只读目录，确认保存错误持续显示、关闭/退出/切换文件均被阻止，恢复权限后重试保存的内容与编辑稿完全一致，窗口随后正常关闭。发布构建和 `.app` 打包通过。真实翻译 API 与 500 页文档性能仍需单独验收。
+- v0.6.2 修正错误/纯文本的方向、字号与内边距缩放；401 与 403 分别提示认证与权限问题，配置类失败提供“打开设置”入口。钥匙串服务按 bundle ID 隔离，正式应用继续使用原来的 `app.endtranslate` 条目。
+- v0.6.2 验证：19 项自动回归通过，其中错误和纯文本各比较 50%、100%、200% 缩放的屏幕与 PDF 绘制像素；独立原生窗口确认实际大小和适应宽度下文字正向、字号同步，模拟 401 后可打开设置、查看 403 提示，服务恢复后测试连接及原选区重试成功，译文已保存。模拟流程仅使用合成 PDF、本机接口和独立钥匙串；发布构建与签名检查通过。真实服务最近返回 Key 无效，仍需在应用内填写对应服务商的有效 Key 才能验证真实翻译。
 
 ### 手动验收
 

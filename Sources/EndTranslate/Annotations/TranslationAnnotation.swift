@@ -61,7 +61,7 @@ final class TranslationAnnotation: PDFAnnotation {
         if showsOriginal { return Self.collapsedHeight }
         if status == .loading { return Self.loadingHeight(for: model.rect) + 2 * Self.margin }
         if status == .done, let rendered { return rendered.size.height + 2 * Self.margin }
-        let width = boxWidth(pageWidth: pageWidth) - 6
+        let width = boxWidth(pageWidth: pageWidth) - (isFailed ? 10 : 6)
         return max(Self.measuredHeight(text: displayText, width: width, fontSize: 10) + 6, 16) + 2 * Self.margin
     }
 
@@ -93,7 +93,15 @@ final class TranslationAnnotation: PDFAnnotation {
         return ceil(fit.height)
     }
 
-    static func drawText(_ text: String, color: NSColor, in rect: CGRect, context: CGContext) {
+    /// CoreText draws in y-up coordinates. Screen overlays are y-down, whereas PDF
+    /// exports are y-up. Layout stays in PDF points so the font tracks the page zoom.
+    static func drawText(_ text: String, color: NSColor, in rect: CGRect, context: CGContext,
+                         yDown: Bool = false, scale: CGFloat = 1) {
+        guard scale.isFinite, scale > 0,
+              rect.minX.isFinite, rect.minY.isFinite,
+              rect.width.isFinite, rect.height.isFinite,
+              rect.width > 0, rect.height > 0 else { return }
+        let logicalRect = CGRect(x: 0, y: 0, width: rect.width / scale, height: rect.height / scale)
         var fontSize: CGFloat = 10
         var framesetter: CTFramesetter
         var fitHeight: CGFloat = 0
@@ -105,14 +113,16 @@ final class TranslationAnnotation: PDFAnnotation {
             framesetter = CTFramesetterCreateWithAttributedString(attrString)
             fitHeight = CTFramesetterSuggestFrameSizeWithConstraints(
                 framesetter, CFRange(), nil,
-                CGSize(width: rect.width, height: .greatestFiniteMagnitude), nil
+                CGSize(width: logicalRect.width, height: .greatestFiniteMagnitude), nil
             ).height
-            if fitHeight <= rect.height || fontSize <= 5 { break }
+            if fitHeight <= logicalRect.height || fontSize <= 5 { break }
             fontSize -= 0.5
         }
         context.saveGState()
+        context.translateBy(x: rect.minX, y: yDown ? rect.maxY : rect.minY)
+        context.scaleBy(x: scale, y: yDown ? -scale : scale)
         context.textMatrix = .identity
-        let path = CGPath(rect: rect, transform: nil)
+        let path = CGPath(rect: logicalRect, transform: nil)
         let frame = CTFramesetterCreateFrame(framesetter, CFRange(location: 0, length: 0), path, nil)
         CTFrameDraw(frame, context)
         context.restoreGState()

@@ -34,7 +34,7 @@ struct SettingsView: View {
                     .fixedSize()
                 }
             } footer: {
-                Text("任意 OpenAI 兼容接口，模型需支持图片输入。API Key 保存在钥匙串中。")
+                Text("模型需支持图片输入；API Key 必须与 Base URL 对应的服务商匹配，切换预设后请核对。Key 保存在钥匙串中。")
                     .foregroundStyle(.secondary)
             }
 
@@ -53,7 +53,7 @@ struct SettingsView: View {
                     case .failed(let message)?:
                         Label(message, systemImage: "xmark.octagon.fill")
                             .foregroundStyle(.red)
-                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                             .textSelection(.enabled)
                     case nil:
                         EmptyView()

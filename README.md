@@ -36,6 +36,8 @@ zsh scripts/make-app.sh
 - 右键可以重新翻译、拷贝、删除；删除支持 ⌘Z 撤销。
 - ⌘O 打开文件，⌘, 配置服务，⇧⌘E 导出 PDF。
 
+如果翻译出现 HTTP 401，打开设置，核对 Base URL 和 API Key 是否属于同一服务商，并重新填写有效的 Key；HTTP 403 则需要检查模型权限或账户限制。先用“测试连接”验证，再点击失败的译文框重试。Key 只需填在应用中。
+
 ## 译注保存
 
 例如 `paper.pdf` 的译注保存在同目录的 `paper.etr.json`。移动或备份阅读资料时，把这两个文件放在一起。API Key 保存在 macOS 钥匙串，不写入译注文件。
@@ -52,6 +54,6 @@ zsh scripts/make-app.sh
 zsh scripts/test.sh
 ```
 
-脚本自动处理 Command Line Tools 的 Testing 框架路径。测试使用临时文件和合成 PDF，不调用翻译 API，也不依赖 Typst。覆盖保存/删除失败与重试、损坏文件备份、PDF 校验、纯文本与矢量导出等路径。权限测试需要普通用户运行；root 运行时会跳过这些用例。
+脚本自动处理 Command Line Tools 的 Testing 框架路径。测试使用临时文件和合成 PDF，不调用翻译 API，也不依赖 Typst。覆盖保存/删除失败与重试、损坏文件备份、PDF 校验、纯文本与矢量导出，以及错误/纯文本在不同缩放下的绘制方向与字号。权限测试需要普通用户运行；root 运行时会跳过这些用例。
 
 完整设计和历史实现说明见 [PLAN.md](PLAN.md)。

@@ -1,6 +1,7 @@
 // Checks CoreText orientation in a flipped NSView — the overlay's drawing context.
-// Top half: TranslationAnnotation.drawText as-is. Bottom half: same text drawn with the
+// Top half: intentionally uncorrected CoreText (the historical bug). Bottom half: the
 // CTM flipped back to y-up inside the rect. Writes /tmp/et-flipped-text.png.
+// TranslationTextTests exercise the production renderer at multiple zoom levels.
 import AppKit
 import CoreText
 

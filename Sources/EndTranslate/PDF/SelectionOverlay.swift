@@ -660,6 +660,7 @@ final class SelectionOverlay: NSView {
             ctx.setFillColor(tint.cgColor)
             ctx.fill(rect)
 
+            let textScale = rect.width / view.bounds.width
             switch view.status {
             case .loading:
                 drawSkeleton(in: rect, phase: phase, context: ctx)
@@ -667,10 +668,14 @@ final class SelectionOverlay: NSView {
                 if let rendered = view.rendered {
                     rendered.draw(in: rect, context: ctx, yDown: true)
                 } else {
-                    TranslationAnnotation.drawText(view.displayText, color: .black, in: rect.insetBy(dx: 3, dy: 3), context: ctx)
+                    TranslationAnnotation.drawText(view.displayText, color: .black,
+                        in: rect.insetBy(dx: 3 * textScale, dy: 3 * textScale), context: ctx,
+                        yDown: true, scale: textScale)
                 }
             case .failed:
-                TranslationAnnotation.drawText(view.displayText, color: .systemRed, in: rect.insetBy(dx: 5, dy: 3), context: ctx)
+                TranslationAnnotation.drawText(view.displayText, color: .systemRed,
+                    in: rect.insetBy(dx: 5 * textScale, dy: 3 * textScale), context: ctx,
+                    yDown: true, scale: textScale)
             }
             // Left rule instead of a full frame: reads as an interlinear gloss, not a sticky note.
             ctx.setFillColor(rule.withAlphaComponent(isHovered ? 0.9 : 0.55).cgColor)

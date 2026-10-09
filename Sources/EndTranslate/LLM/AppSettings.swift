@@ -59,7 +59,9 @@ final class AppSettings: ObservableObject {
 }
 
 enum Keychain {
-    private static let service = "app.endtranslate"
+    // Keep separately bundled development/validation apps out of the user's keychain entry.
+    // The shipping bundle and `swift run` retain the original service name.
+    private static let service = Bundle.main.bundleIdentifier ?? "app.endtranslate"
 
     static func read(account: String) -> String? {
         let query: [String: Any] = [
