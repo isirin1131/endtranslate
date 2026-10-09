@@ -38,6 +38,8 @@ enum OpenRequests {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static weak var reader: PDFViewModel?
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         AppSettings.migrateLegacyDefaults()
         // `swift run EndTranslate paper.pdf`
@@ -59,6 +61,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // willTerminate is too late to cancel quitting when a write fails.
+        Self.reader?.flush() == false ? .terminateCancel : .terminateNow
+    }
 }
 
 struct AppCommands: Commands {

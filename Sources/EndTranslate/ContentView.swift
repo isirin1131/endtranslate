@@ -25,8 +25,10 @@ struct ContentView: View {
             .sheet(item: $model.editing) { session in
                 AnnotationEditorView(session: session, model: model)
             }
+            .background(WindowSaveGuard(model: model))
             .focusedSceneObject(model)
             .onAppear {
+                AppDelegate.reader = model
                 model.undoManager = undoManager
                 if let url = OpenRequests.takePending() {
                     model.open(url: url)
@@ -219,7 +221,17 @@ private struct StatusPill: View {
 
     var body: some View {
         Group {
-            if let toast = model.toast {
+            if let error = model.saveError {
+                HStack(spacing: 8) {
+                    Label("译注尚未保存，请检查文件夹权限和剩余空间", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                    Button("重试保存") { model.saveNow() }
+                        .buttonStyle(.link)
+                }
+                .help(error)
+                .pill()
+            } else if let toast = model.toast {
                 HStack(spacing: 8) {
                     Image(systemName: toast.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                         .foregroundStyle(toast.isError ? Color.orange : Color.green)
@@ -236,6 +248,12 @@ private struct StatusPill: View {
                 .id(toast.id)
                 .pill()
                 .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else if model.isPreparingDocument {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("正在载入译注…")
+                }
+                .pill()
             } else if model.activeTranslations > 0 {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)

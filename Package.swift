@@ -8,6 +8,11 @@ let package = Package(
         .executableTarget(
             name: "EndTranslate",
             path: "Sources/EndTranslate"
+        ),
+        .testTarget(
+            name: "EndTranslateTests",
+            dependencies: ["EndTranslate"],
+            path: "Tests/EndTranslateTests"
         )
     ]
 )

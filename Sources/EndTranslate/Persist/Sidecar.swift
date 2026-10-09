@@ -3,10 +3,12 @@ import CryptoKit
 
 enum SidecarIO {
     enum LoadResult {
-        /// No sidecar next to the PDF (or it can't be read).
+        /// No sidecar next to the PDF.
         case missing
         /// Written for a different version of the PDF.
         case mismatch
+        /// Existing data must be backed up before a later save replaces it.
+        case unreadable(String)
         case loaded([Annotation])
     }
 
@@ -18,11 +20,11 @@ enum SidecarIO {
         url(for: pdfURL).appendingPathExtension("bak")
     }
 
-    static func sha256(of url: URL) -> String? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    static func sha256(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hasher = SHA256()
-        while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+        while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
             hasher.update(data: chunk)
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
@@ -31,9 +33,19 @@ enum SidecarIO {
     /// Loads annotations only if the sidecar was written for this exact PDF.
     static func load(for pdfURL: URL, pdfSha256: String?) -> LoadResult {
         let sidecarURL = url(for: pdfURL)
-        guard let data = try? Data(contentsOf: sidecarURL) else { return .missing }
+        let data: Data
+        do {
+            data = try Data(contentsOf: sidecarURL)
+        } catch {
+            if isMissing(error) { return .missing }
+            Log.write("sidecar read failed: \(error)")
+            return .unreadable(error.localizedDescription)
+        }
         do {
             let sidecar = try JSONDecoder().decode(Sidecar.self, from: data)
+            guard sidecar.version == 1 else {
+                return .unreadable("不支持的译注版本：\(sidecar.version)")
+            }
             guard let pdfSha256, sidecar.pdfSha256 == pdfSha256 else {
                 Log.write("sidecar sha mismatch, ignoring \(sidecarURL.lastPathComponent)")
                 return .mismatch
@@ -42,43 +54,55 @@ enum SidecarIO {
             return .loaded(sidecar.annotations)
         } catch {
             Log.write("sidecar decode failed: \(error)")
-            return .missing
+            return .unreadable(error.localizedDescription)
         }
     }
 
-    /// Moves the current sidecar aside to `<name>.etr.json.bak` (replacing an older backup).
-    static func backup(for pdfURL: URL) {
-        let source = url(for: pdfURL)
-        let target = backupURL(for: pdfURL)
-        guard FileManager.default.fileExists(atPath: source.path) else { return }
-        try? FileManager.default.removeItem(at: target)
-        do {
-            try FileManager.default.copyItem(at: source, to: target)
-            Log.write("sidecar backed up to \(target.lastPathComponent)")
-        } catch {
-            Log.write("sidecar backup failed: \(error)")
-        }
-    }
-
+    /// Copies the current sidecar aside without replacing an earlier backup.
+    /// If this fails, the caller must leave the source untouched.
     @discardableResult
-    static func save(_ annotations: [Annotation], pdfSha256: String, for pdfURL: URL) -> Bool {
+    static func backup(for pdfURL: URL) throws -> URL? {
+        let source = url(for: pdfURL)
+        do {
+            _ = try FileManager.default.attributesOfItem(atPath: source.path)
+        } catch {
+            if isMissing(error) { return nil }
+            throw error
+        }
+        let base = backupURL(for: pdfURL)
+        var target = base
+        var suffix = 1
+        while FileManager.default.fileExists(atPath: target.path) {
+            target = base.appendingPathExtension(String(suffix))
+            suffix += 1
+        }
+        try FileManager.default.copyItem(at: source, to: target)
+        Log.write("sidecar backed up to \(target.lastPathComponent)")
+        return target
+    }
+
+    static func save(_ annotations: [Annotation], pdfSha256: String, for pdfURL: URL) throws {
         // No annotations left: don't leave an empty sidecar next to the PDF.
         if annotations.isEmpty {
-            try? FileManager.default.removeItem(at: url(for: pdfURL))
+            do {
+                try FileManager.default.removeItem(at: url(for: pdfURL))
+            } catch {
+                if !isMissing(error) { throw error }
+            }
             Log.write("sidecar removed (no annotations)")
-            return true
+            return
         }
         let sidecar = Sidecar(pdfSha256: pdfSha256, annotations: annotations)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        do {
-            let data = try encoder.encode(sidecar)
-            try data.write(to: url(for: pdfURL), options: .atomic)
-            Log.write("sidecar saved \(annotations.count) annotation(s)")
-            return true
-        } catch {
-            Log.write("sidecar save failed: \(error)")
-            return false
-        }
+        let data = try encoder.encode(sidecar)
+        try data.write(to: url(for: pdfURL), options: .atomic)
+        Log.write("sidecar saved \(annotations.count) annotation(s)")
+    }
+
+    private static func isMissing(_ error: Error) -> Bool {
+        let error = error as NSError
+        return error.domain == NSCocoaErrorDomain
+            && [NSFileNoSuchFileError, NSFileReadNoSuchFileError].contains(error.code)
     }
 }

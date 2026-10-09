@@ -20,6 +20,8 @@ final class PDFViewModel: ObservableObject {
     @Published var toast: Toast?
     @Published private(set) var activeTranslations = 0
     @Published private(set) var recentFiles: [URL] = ReadingHistory.recent()
+    @Published private(set) var saveError: String?
+    @Published private(set) var isPreparingDocument = false
     /// Bumped to ask the view layer to open the Settings window.
     @Published var settingsRequest = 0
 
@@ -30,13 +32,10 @@ final class PDFViewModel: ObservableObject {
     /// Keeps the one-page documents backing replaced pages alive.
     private var pageSources: [Int: PDFDocument] = [:]
     private(set) var fileURL: URL?
-    private var pdfSha256: String?
+    private var persistence: AnnotationPersistence?
     private var saveTask: Task<Void, Never>?
-    private var saveDirty = false
     private var positionRestored = false
     private var positionTask: Task<Void, Never>?
-    /// The sidecar on disk belongs to another version of this PDF: keep a copy before replacing it.
-    private var backupSidecarBeforeSave = false
     private var toastTask: Task<Void, Never>?
     weak var pdfView: PDFView?
     weak var undoManager: UndoManager?
@@ -64,7 +63,7 @@ final class PDFViewModel: ObservableObject {
         observers.append(NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.flush() }
+            MainActor.assumeIsolated { _ = self?.flush() }
         })
     }
 
@@ -110,7 +109,12 @@ final class PDFViewModel: ObservableObject {
 
     func open(url: URL) {
         let url = url.standardizedFileURL
-        if url == fileURL { return }
+        if url == fileURL {
+            if let persistence, !persistence.isReady, !isPreparingDocument {
+                prepareAnnotations(persistence)
+            }
+            return
+        }
         guard let doc = PDFDocument(url: url), let original = PDFDocument(url: url) else {
             show("无法打开 \(url.lastPathComponent)", isError: true)
             return
@@ -120,22 +124,24 @@ final class PDFViewModel: ObservableObject {
             return
         }
         // Flush the outgoing document before its state is replaced.
-        flush()
-        saveTask?.cancel()
+        guard flush() else { return }
         editing = nil
+        undoManager?.removeAllActions()
+        dismissToast()
 
+        let session = AnnotationPersistence(pdfURL: url)
+        persistence = session
         originalDocument = original
         pageSources.removeAll()
         document = doc
         fileURL = url
         fileName = url.lastPathComponent
         currentPageIndex = 0
-        pdfSha256 = nil
+        saveError = nil
         store.removeAll()
         // Installing the document posts page-changed notifications; until the saved
         // position is restored they must not overwrite it with "page 1".
         positionRestored = false
-        backupSidecarBeforeSave = false
         pdfView?.document = doc
         pdfView?.autoScales = true
         pdfView?.layoutDocumentView()
@@ -145,14 +151,30 @@ final class PDFViewModel: ObservableObject {
         recentFiles = ReadingHistory.recent()
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
 
+        prepareAnnotations(session)
+    }
+
+    private func prepareAnnotations(_ session: AnnotationPersistence) {
+        guard persistence === session else { return }
+        isPreparingDocument = true
+        let url = session.pdfURL
         Task {
-            // Hashing a large PDF takes a moment; keep it off the main thread.
-            let sha = await Task.detached(priority: .userInitiated) { SidecarIO.sha256(of: url) }.value
-            guard self.fileURL == url else { return }
-            self.pdfSha256 = sha
-            self.restoreAnnotations(for: url)
-            // Anything created while hashing couldn't be saved yet.
-            if self.saveDirty { self.scheduleSave() }
+            do {
+                // Reading may fail partway through; never attach notes to a partial hash.
+                let sha = try await Task.detached(priority: .userInitiated) {
+                    try SidecarIO.sha256(of: url)
+                }.value
+                guard self.persistence === session else { return }
+                self.restoreAnnotations(session.load(pdfSha256: sha), session: session)
+                self.isPreparingDocument = false
+            } catch {
+                guard self.persistence === session else { return }
+                self.isPreparingDocument = false
+                Log.write("PDF hash failed: \(error)")
+                self.show("无法读取 PDF，译注暂未加载", isError: true, actionTitle: "重试") { [weak self] in
+                    self?.prepareAnnotations(session)
+                }
+            }
         }
     }
 
@@ -168,16 +190,19 @@ final class PDFViewModel: ObservableObject {
         NSDocumentController.shared.clearRecentDocuments(nil)
     }
 
-    private func restoreAnnotations(for url: URL) {
+    private func restoreAnnotations(_ result: SidecarIO.LoadResult, session: AnnotationPersistence) {
         let models: [Annotation]
-        switch SidecarIO.load(for: url, pdfSha256: pdfSha256) {
+        switch result {
         case .missing:
             return
         case .mismatch:
             // The PDF changed since these were made; their positions may no longer fit.
             // Keep the old file around instead of silently overwriting it on the next save.
-            backupSidecarBeforeSave = true
             show("已有的译注属于此文件的另一版本，未加载（再次保存前会备份为 .bak）", isError: true)
+            return
+        case .unreadable(let reason):
+            Log.write("existing sidecar requires backup: \(reason)")
+            show("已有译注无法读取，未加载；再次保存前会先备份原文件", isError: true)
             return
         case .loaded(let loaded):
             models = loaded
@@ -187,20 +212,26 @@ final class PDFViewModel: ObservableObject {
             let annotation = TranslationAnnotation(model: model)
             // An empty translation was in flight or failed when the app last closed.
             annotation.status = model.translationMd.isEmpty ? .failed("上次未完成") : .done
+            annotation.fallbackText = MarkdownToTypst.plainText(model.translationMd)
             store.add(model, view: annotation)
             return annotation
         }
+        // Give notes valid bounds immediately, including when exporting before typst finishes.
+        for page in Set(models.map(\.page)).sorted() { relayout(page: page) }
         Task {
             for chunk in stride(from: 0, to: annotations.count, by: 4).map({ Array(annotations[$0..<min($0 + 4, annotations.count)]) }) {
+                guard self.persistence === session else { return }
                 await withTaskGroup(of: Void.self) { group in
                     for annotation in chunk where annotation.status == .done {
                         group.addTask { @MainActor [weak self] in
-                            await self?.render(annotation, markdown: annotation.model.translationMd)
+                            guard let self, self.persistence === session,
+                                  self.store.view(for: annotation.model.id) === annotation else { return }
+                            await self.render(annotation, markdown: annotation.model.translationMd)
                         }
                     }
                 }
             }
-            guard self.fileURL == url else { return }
+            guard self.persistence === session else { return }
             for page in Set(models.map(\.page)).sorted() { relayout(page: page) }
         }
     }
@@ -227,10 +258,12 @@ final class PDFViewModel: ObservableObject {
     }
 
     /// Writes everything pending right now (window closing, app quitting, switching files).
-    func flush() {
+    @discardableResult
+    func flush() -> Bool {
+        saveTask?.cancel()
         positionTask?.cancel()
         savePosition()
-        saveNow()
+        return saveNow()
     }
 
     /// Waits for the view to be on screen with a real size (at launch it may not be yet),
@@ -359,8 +392,8 @@ final class PDFViewModel: ObservableObject {
     // MARK: persistence
 
     func scheduleSave() {
-        guard fileURL != nil else { return }
-        saveDirty = true
+        guard let persistence else { return }
+        persistence.markChanged()
         saveTask?.cancel()
         // Strong capture: a save that's already scheduled must land even if the window closes.
         saveTask = Task {
@@ -371,14 +404,18 @@ final class PDFViewModel: ObservableObject {
     }
 
     /// Writes pending changes immediately (debounce flush on quit / document switch).
-    func saveNow() {
-        guard saveDirty, let fileURL, let pdfSha256 else { return }
-        saveDirty = false
-        if backupSidecarBeforeSave {
-            backupSidecarBeforeSave = false
-            SidecarIO.backup(for: fileURL)
+    @discardableResult
+    func saveNow() -> Bool {
+        guard let persistence else { return true }
+        do {
+            try persistence.save(store.annotations)
+            saveError = nil
+            return true
+        } catch {
+            saveError = error.localizedDescription
+            Log.write("sidecar save failed: \(error)")
+            return false
         }
-        SidecarIO.save(store.annotations, pdfSha256: pdfSha256, for: fileURL)
     }
 
     func exportAnnotatedPDF() {
@@ -416,6 +453,10 @@ final class PDFViewModel: ObservableObject {
     /// Called when the user confirms a selection. Returns false to keep the selection
     /// pending (the translation service isn't configured yet).
     func handleSelection(pageIndex: Int, rect: CGRect) -> Bool {
+        guard persistence?.isReady == true else {
+            show("译注尚未加载完成，请稍后再点「翻译」", isError: true)
+            return false
+        }
         guard AppSettings.shared.isConfigured else {
             show("先在设置中填写翻译服务，然后再点「翻译」", isError: true)
             settingsRequest += 1
@@ -466,6 +507,7 @@ final class PDFViewModel: ObservableObject {
                 store.update(annotation.model)
                 scheduleSave()
                 await render(annotation, markdown: text)
+                guard store.view(for: model.id) === annotation else { return }
                 annotation.status = .done
                 relayout(page: model.page, anchor: anchor(for: model))
             } catch {
@@ -546,6 +588,7 @@ final class PDFViewModel: ObservableObject {
         annotation.showsOriginal = false
         Task {
             await render(annotation, markdown: session.draft)
+            guard store.view(for: session.id) === annotation else { return }
             relayout(page: annotation.model.page, anchor: anchor(for: annotation.model))
         }
     }

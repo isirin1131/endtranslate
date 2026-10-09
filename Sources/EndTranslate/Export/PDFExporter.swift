@@ -20,7 +20,7 @@ enum PDFExportError: LocalizedError {
 enum PDFExporter {
     static func export(document: PDFDocument, overlays: [TranslationAnnotation], to url: URL) throws {
         var byPage: [Int: [TranslationAnnotation]] = [:]
-        for overlay in overlays where overlay.rendered != nil && !overlay.showsOriginal {
+        for overlay in overlays where overlay.status == .done && !overlay.showsOriginal {
             byPage[overlay.model.page, default: []].append(overlay)
         }
 
@@ -63,7 +63,12 @@ enum PDFExporter {
         context.saveGState()
         context.setFillColor(CGColor(red: 0.955, green: 0.965, blue: 1, alpha: 1))
         context.fill(rect)
-        overlay.rendered?.draw(in: rect, context: context)
+        if let rendered = overlay.rendered {
+            rendered.draw(in: rect, context: context)
+        } else {
+            let text = overlay.fallbackText ?? MarkdownToTypst.plainText(overlay.model.translationMd)
+            TranslationAnnotation.drawText(text, color: .black, in: rect.insetBy(dx: 3, dy: 3), context: context)
+        }
         context.setFillColor(CGColor(red: 0.2, green: 0.45, blue: 0.95, alpha: 0.55))
         context.fill(CGRect(x: rect.minX, y: rect.minY, width: 1.5, height: rect.height))
         context.restoreGState()
