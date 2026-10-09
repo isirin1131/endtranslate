@@ -31,6 +31,7 @@ final class SelectionOverlay: NSView {
     // so a stray trackpad drag never fires a translation by itself.
     private var pendingPage: Int?
     private var pendingRect: CGRect = .null
+    private var adjustment: SelectionAdjustment?
     private weak var menuAnnotation: TranslationAnnotation?
     private weak var hovered: TranslationAnnotation?
     private var hoveredChipButton: Int?
@@ -116,9 +117,10 @@ final class SelectionOverlay: NSView {
     }
 
     private var hasLoadingAnnotation: Bool { !loadingAnnotations.isEmpty }
+    private var isDraggingSelection: Bool { anchorPage != nil || adjustment != nil }
 
     private func updateAnimationTimer() {
-        let needed = anchorPage != nil || hasLoadingAnnotation || Date() < settleUntil
+        let needed = isDraggingSelection || hasLoadingAnnotation || Date() < settleUntil
         if needed, animationTimer == nil {
             let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.tick() }
@@ -133,7 +135,7 @@ final class SelectionOverlay: NSView {
 
     private func tick() {
         var changed = false
-        if anchorPage != nil {
+        if isDraggingSelection {
             maybeAutoScroll()
             recomputeSelection()
             changed = true
@@ -189,10 +191,20 @@ final class SelectionOverlay: NSView {
     }
 
     private func updateHover(at p: NSPoint, modifiers: NSEvent.ModifierFlags) {
+        if let adjustment {
+            setHovered(nil, chipButton: nil)
+            cursor(for: adjustment.kind, dragging: true).set()
+            return
+        }
         if let chip = chipRects(), chip.frame.contains(p) {
             let button = chip.confirm.contains(p) ? 0 : (chip.cancel.contains(p) ? 1 : nil)
             setHovered(nil, chipButton: button)
             NSCursor.pointingHand.set()
+            return
+        }
+        if !modifiers.contains(.option), let kind = pendingInteraction(at: p) {
+            setHovered(nil, chipButton: nil)
+            cursor(for: kind).set()
             return
         }
         // Option forces a new selection even on top of an existing box.
@@ -237,6 +249,12 @@ final class SelectionOverlay: NSView {
         return p
     }
 
+    private func overlayPoint(original point: CGPoint, page index: Int) -> CGPoint? {
+        guard let pdfView, let page = displayedPage(index) else { return nil }
+        let expanded = CGPoint(x: point.x, y: layout(index).expand(point.y))
+        return convert(pdfView.convert(expanded, from: page), from: pdfView)
+    }
+
     /// Original-coordinate rect → overlay rect (a rect spanning a gap stretches over it).
     private func overlayRect(original rect: CGRect, page index: Int) -> CGRect? {
         guard let pdfView, let page = displayedPage(index) else { return nil }
@@ -261,6 +279,48 @@ final class SelectionOverlay: NSView {
     }
 
     // MARK: hit testing
+
+    private func pendingHandlePoints() -> [(SelectionHandle, CGPoint)] {
+        guard let pendingPage, !pendingRect.isNull else { return [] }
+        return SelectionHandle.allCases.compactMap { handle in
+            overlayPoint(original: handle.point(in: pendingRect), page: pendingPage).map { (handle, $0) }
+        }
+    }
+
+    private func pendingInteraction(at point: CGPoint) -> SelectionAdjustment.Kind? {
+        guard let pendingPage, let rect = overlayRect(original: pendingRect, page: pendingPage) else { return nil }
+        let points = pendingHandlePoints()
+        func distance(to other: CGPoint) -> CGFloat { hypot(point.x - other.x, point.y - other.y) }
+        if let closest = points.min(by: { distance(to: $0.1) < distance(to: $1.1) }),
+           distance(to: closest.1) <= 8 {
+            return .resize(closest.0)
+        }
+        // The whole edge is draggable, not just the small handle at its midpoint.
+        for handle in SelectionHandle.allCases {
+            guard let (first, last) = handle.edgeCorners,
+                  let a = points.first(where: { $0.0 == first })?.1,
+                  let b = points.first(where: { $0.0 == last })?.1 else { continue }
+            let dx = b.x - a.x, dy = b.y - a.y
+            let lengthSquared = dx * dx + dy * dy
+            guard lengthSquared > 0 else { continue }
+            let t = min(max(((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared, 0), 1)
+            if distance(to: CGPoint(x: a.x + t * dx, y: a.y + t * dy)) <= 5 { return .resize(handle) }
+        }
+        return rect.contains(point) ? .move : nil
+    }
+
+    private func cursor(for kind: SelectionAdjustment.Kind, dragging: Bool = false) -> NSCursor {
+        switch kind {
+        case .move: return dragging ? .closedHand : .openHand
+        case .resize(let handle):
+            let rotated = pendingPage.flatMap { displayedPage($0) }?.rotation ?? 0
+            switch handle {
+            case .left, .right: return rotated % 180 == 0 ? .resizeLeftRight : .resizeUpDown
+            case .top, .bottom: return rotated % 180 == 0 ? .resizeUpDown : .resizeLeftRight
+            default: return .crosshair
+            }
+        }
+    }
 
     private func annotation(at overlayPoint: NSPoint) -> TranslationAnnotation? {
         guard let pdfView, let doc = pdfView.document, let store else { return nil }
@@ -291,8 +351,19 @@ final class SelectionOverlay: NSView {
                 return
             }
             if chip.frame.contains(p) { return }
-            cancelPending()
         }
+        if !event.modifierFlags.contains(.option), let page = pendingPage,
+           let kind = pendingInteraction(at: p), let origin = originalPoint(p, page: page) {
+            window?.makeFirstResponder(self)
+            adjustment = SelectionAdjustment(kind: kind, startPoint: origin, startRect: pendingRect)
+            currentOverlayPoint = p
+            lastToggle = nil
+            cursor(for: kind, dragging: true).set()
+            needsDisplay = true
+            updateAnimationTimer()
+            return
+        }
+        if pendingPage != nil { cancelPending() }
         if event.clickCount >= 2, !event.modifierFlags.contains(.option), let last = lastToggle,
            event.timestamp - last.time <= NSEvent.doubleClickInterval, let annotation = last.annotation {
             // The first click of this double-click already toggled the box (possibly out from
@@ -336,7 +407,7 @@ final class SelectionOverlay: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard anchorPage != nil else { return }
+        guard isDraggingSelection else { return }
         currentOverlayPoint = convert(event.locationInWindow, from: nil)
         recomputeSelection()
         needsDisplay = true
@@ -344,9 +415,14 @@ final class SelectionOverlay: NSView {
 
     override func mouseUp(with event: NSEvent) {
         defer { endDrag() }
+        guard isDraggingSelection else { return }
+        currentOverlayPoint = convert(event.locationInWindow, from: nil)
+        recomputeSelection()
+        if adjustment != nil { return }
         guard let page = anchorPage else { return }
         let rect = selectionPageRect
-        guard !rect.isNull, rect.width >= 3, rect.height >= 3 else {
+        guard !rect.isNull, rect.width >= SelectionAdjustment.minimumSize,
+              rect.height >= SelectionAdjustment.minimumSize else {
             if let pdfView { window?.makeFirstResponder(pdfView) }
             return
         }
@@ -356,6 +432,7 @@ final class SelectionOverlay: NSView {
 
     private func endDrag() {
         anchorPage = nil
+        adjustment = nil
         currentOverlayPoint = nil
         selectionPageRect = .null
         needsDisplay = true
@@ -417,11 +494,8 @@ final class SelectionOverlay: NSView {
         switch event.keyCode {
         case 36 where pendingPage != nil, 76 where pendingPage != nil: // return, keypad enter
             confirmPending()
-        case 53 where anchorPage != nil: // esc mid-drag
-            endDrag()
-            restoreFirstResponder()
-        case 53 where pendingPage != nil:
-            cancelPending()
+        case 53 where isDraggingSelection || pendingPage != nil:
+            cancelSelectionInteraction()
         default:
             // Everything else (arrows, space, page up/down) keeps scrolling the document.
             if let pdfView { pdfView.keyDown(with: event) } else { super.keyDown(with: event) }
@@ -429,11 +503,23 @@ final class SelectionOverlay: NSView {
     }
 
     override func cancelOperation(_ sender: Any?) {
-        if pendingPage != nil { cancelPending() }
+        cancelSelectionInteraction()
+    }
+
+    private func cancelSelectionInteraction() {
+        if let adjustment {
+            pendingRect = adjustment.startRect
+            endDrag()
+        } else if anchorPage != nil {
+            endDrag()
+            restoreFirstResponder()
+        } else if pendingPage != nil {
+            cancelPending()
+        }
     }
 
     private func confirmPending() {
-        guard let page = pendingPage else { return }
+        guard let page = pendingPage, !isDraggingSelection else { return }
         let rect = pendingRect
         let accepted = onSelection?(page, rect) ?? true
         guard accepted else { return }
@@ -454,6 +540,7 @@ final class SelectionOverlay: NSView {
     }
 
     func clearPending() {
+        endDrag()
         pendingPage = nil
         pendingRect = .null
         hoveredChipButton = nil
@@ -498,8 +585,9 @@ final class SelectionOverlay: NSView {
     }
 
     private func chipRects() -> ChipRects? {
-        guard let pendingPage, !pendingRect.isNull,
-              let sel = overlayRect(original: pendingRect, page: pendingPage) else { return nil }
+        guard adjustment == nil, let pendingPage, !pendingRect.isNull,
+              let sel = overlayRect(original: pendingRect, page: pendingPage),
+              sel.intersects(bounds) else { return nil }
         let confirmW: CGFloat = 66
         let cancelW: CGFloat = 50
         let buttonH: CGFloat = 24
@@ -517,6 +605,11 @@ final class SelectionOverlay: NSView {
     }
 
     private func recomputeSelection() {
+        if let adjustment, let page = pendingPage, let cur = currentOverlayPoint,
+           let point = originalPoint(cur, page: page), let pageBounds = originalBounds(page: page) {
+            pendingRect = adjustment.rect(at: point, within: pageBounds)
+            return
+        }
         guard let page = anchorPage, let cur = currentOverlayPoint,
               var pt = originalPoint(cur, page: page), let pb = originalBounds(page: page) else { return }
         pt.x = min(max(pt.x, pb.minX), pb.maxX)
@@ -559,9 +652,10 @@ final class SelectionOverlay: NSView {
     }
 
     private func drawPendingConfirm() {
-        guard let chip = chipRects(), let pendingPage,
+        guard let pendingPage, !pendingRect.isNull,
               let sel = overlayRect(original: pendingRect, page: pendingPage) else { return }
         NSGraphicsContext.current?.saveGraphicsState()
+        defer { NSGraphicsContext.current?.restoreGraphicsState() }
         Self.accent.withAlphaComponent(0.08).setFill()
         sel.fill()
         Self.accent.setStroke()
@@ -569,6 +663,17 @@ final class SelectionOverlay: NSView {
         selPath.lineWidth = 1
         selPath.setLineDash([4, 3], count: 2, phase: 0)
         selPath.stroke()
+
+        for (_, point) in pendingHandlePoints() {
+            let handle = NSBezierPath(roundedRect: CGRect(x: point.x - 3.5, y: point.y - 3.5,
+                                                         width: 7, height: 7), xRadius: 1.5, yRadius: 1.5)
+            NSColor.white.setFill()
+            handle.fill()
+            Self.accent.setStroke()
+            handle.lineWidth = 1
+            handle.stroke()
+        }
+        guard let chip = chipRects() else { return }
 
         let shadow = NSShadow()
         shadow.shadowColor = NSColor.black.withAlphaComponent(0.25)
@@ -594,7 +699,6 @@ final class SelectionOverlay: NSView {
         }
         drawChipLabel("翻译 ↩", color: .white, in: chip.confirm)
         drawChipLabel("取消", color: .secondaryLabelColor, in: chip.cancel)
-        NSGraphicsContext.current?.restoreGraphicsState()
     }
 
     private func drawChipLabel(_ text: String, color: NSColor, in rect: CGRect) {

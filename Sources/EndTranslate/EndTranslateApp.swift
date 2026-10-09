@@ -92,6 +92,19 @@ struct AppCommands: Commands {
                 .disabled(model?.document == nil)
         }
         CommandGroup(before: .toolbar) {
+            Button("前往页…") { model?.requestPageJump() }
+                .keyboardShortcut("l")
+                .disabled(model?.document == nil)
+            Button("上一页") { model?.previousPage() }
+                .keyboardShortcut(.leftArrow, modifiers: [.command, .option])
+                .disabled(model?.canGoToPreviousPage != true)
+            Button("下一页") { model?.nextPage() }
+                .keyboardShortcut(.rightArrow, modifiers: [.command, .option])
+                .disabled(model?.canGoToNextPage != true)
+            Button("显示/收起目录") { model?.toggleOutline() }
+                .keyboardShortcut("1", modifiers: [.command, .option])
+                .disabled(model?.document == nil)
+            Divider()
             Button("放大") { model?.zoomIn() }
                 .keyboardShortcut("=")
                 .disabled(model?.document == nil)

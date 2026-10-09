@@ -9,16 +9,14 @@ struct ContentView: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        PDFDocumentView(model: model)
-            .overlay {
-                if model.document == nil {
-                    EmptyStateView(model: model, settings: settings)
-                }
+        HSplitView {
+            if model.showsOutline {
+                PDFOutlineSidebar(model: model)
+                    .frame(minWidth: 180, idealWidth: 240, maxWidth: 340)
             }
-            .overlay(alignment: .bottom) {
-                StatusPill(model: model)
-                    .padding(.bottom, 18)
-            }
+            reader
+                .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
+        }
             .navigationTitle(model.document == nil ? "EndTranslate" : model.fileName)
             .navigationSubtitle(model.pageLabel)
             .toolbar { toolbar }
@@ -44,6 +42,19 @@ struct ContentView: View {
             .onChange(of: model.settingsRequest) { openSettings() }
     }
 
+    private var reader: some View {
+        PDFDocumentView(model: model)
+            .overlay {
+                if model.document == nil {
+                    EmptyStateView(model: model, settings: settings)
+                }
+            }
+            .overlay(alignment: .bottom) {
+                StatusPill(model: model)
+                    .padding(.bottom, 18)
+            }
+    }
+
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
@@ -51,6 +62,16 @@ struct ContentView: View {
                 Label("打开", systemImage: "doc.badge.plus")
             }
             .help("打开 PDF（⌘O）")
+        }
+        ToolbarItem(placement: .navigation) {
+            Button { model.toggleOutline() } label: {
+                Label("目录", systemImage: "sidebar.left")
+            }
+            .help("显示或收起目录（⌥⌘1）")
+            .disabled(model.document == nil)
+        }
+        ToolbarItem(placement: .principal) {
+            PageNavigationControls(model: model)
         }
         ToolbarItemGroup(placement: .primaryAction) {
             ControlGroup {

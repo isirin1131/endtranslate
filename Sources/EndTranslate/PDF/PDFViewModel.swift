@@ -16,6 +16,10 @@ final class PDFViewModel: ObservableObject {
     @Published var document: PDFDocument?
     @Published var fileName: String = ""
     @Published var currentPageIndex: Int = 0
+    @Published private(set) var outline: [PDFOutlineEntry] = []
+    @Published var showsOutline = false
+    @Published private(set) var selectedOutlineID: String?
+    @Published private(set) var pageJumpRequest = 0
     @Published var editing: AnnotationEditSession?
     @Published var toast: Toast?
     @Published private(set) var activeTranslations = 0
@@ -46,17 +50,18 @@ final class PDFViewModel: ObservableObject {
         return "第 \(currentPageIndex + 1) / \(total) 页"
     }
 
+    var pageCount: Int { document?.pageCount ?? 0 }
+    var canGoToPreviousPage: Bool { currentPageIndex > 0 && pageCount > 0 }
+    var canGoToNextPage: Bool { currentPageIndex + 1 < pageCount }
+
     init() {
         observers.append(NotificationCenter.default.addObserver(
             forName: .PDFViewPageChanged, object: nil, queue: .main
         ) { [weak self] note in
             Task { @MainActor [weak self] in
                 guard let self,
-                      let view = note.object as? PDFView, view === self.pdfView,
-                      let page = view.currentPage, let doc = self.document else { return }
-                let index = doc.index(for: page)
-                guard index != NSNotFound else { return }
-                self.currentPageIndex = index
+                      let view = note.object as? PDFView, view === self.pdfView else { return }
+                self.refreshCurrentPage()
                 self.savePosition()
             }
         })
@@ -132,6 +137,8 @@ final class PDFViewModel: ObservableObject {
         let session = AnnotationPersistence(pdfURL: url)
         persistence = session
         originalDocument = original
+        outline = PDFOutlineEntry.read(from: original)
+        selectedOutlineID = nil
         pageSources.removeAll()
         document = doc
         fileURL = url
@@ -236,6 +243,55 @@ final class PDFViewModel: ObservableObject {
         }
     }
 
+    // MARK: navigation
+
+    func requestPageJump() {
+        guard document != nil else { return }
+        pageJumpRequest += 1
+    }
+
+    func toggleOutline() {
+        guard document != nil else { return }
+        showsOutline.toggle()
+    }
+
+    @discardableResult
+    func goToPage(_ text: String) -> Bool {
+        guard let index = PDFNavigationTarget.pageIndex(from: text, pageCount: pageCount) else {
+            show("请输入 1 到 \(pageCount) 之间的页码", isError: true)
+            return false
+        }
+        selectedOutlineID = nil
+        return navigate(to: PDFNavigationTarget(pageIndex: index))
+    }
+
+    func previousPage() {
+        guard canGoToPreviousPage else { return }
+        _ = goToPage(String(currentPageIndex))
+    }
+
+    func nextPage() {
+        guard canGoToNextPage else { return }
+        _ = goToPage(String(currentPageIndex + 2))
+    }
+
+    func goToOutline(_ entry: PDFOutlineEntry) {
+        guard let target = entry.target, navigate(to: target) else { return }
+        selectedOutlineID = entry.id
+    }
+
+    private func navigate(to target: PDFNavigationTarget) -> Bool {
+        guard let view = pdfView, let document,
+              let destination = target.destination(in: document, layout: store.layout(for: target.pageIndex),
+                                                   box: view.displayBox) else { return false }
+        view.subviews.compactMap { $0 as? SelectionOverlay }.forEach { $0.clearPending() }
+        view.go(to: destination)
+        currentPageIndex = target.pageIndex
+        savePosition()
+        SelectionOverlay.requestInvalidate()
+        return true
+    }
+
     // MARK: reading position
 
     private func savePosition() {
@@ -248,6 +304,7 @@ final class PDFViewModel: ObservableObject {
 
     /// Scrolling settles → remember where the reader is (debounced).
     func viewportDidChange() {
+        refreshCurrentPage()
         guard positionRestored else { return }
         positionTask?.cancel()
         positionTask = Task { [weak self] in
@@ -255,6 +312,14 @@ final class PDFViewModel: ObservableObject {
             guard !Task.isCancelled else { return }
             self?.savePosition()
         }
+    }
+
+    private func refreshCurrentPage() {
+        // PDFKit's cached currentPage can still refer to the previous scroll position
+        // after replacing a document. Use the page actually at the viewport's top.
+        guard let view = pdfView, view.document === document,
+              let top = viewportTopAnchor(), currentPageIndex != top.page else { return }
+        currentPageIndex = top.page
     }
 
     /// Writes everything pending right now (window closing, app quitting, switching files).
@@ -286,6 +351,7 @@ final class PDFViewModel: ObservableObject {
         window.representedURL = url
         defer {
             positionRestored = true
+            refreshCurrentPage()
             SelectionOverlay.requestInvalidate()
         }
         guard let position = ReadingHistory.position(for: url),

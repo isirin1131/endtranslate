@@ -4,10 +4,12 @@
 
 A native macOS PDF reader with inline translation, LaTeX math rendering, and annotated PDF export. Built with SwiftUI, AppKit, and PDFKit.
 
+当前版本 **1.0.0**。可从 [GitHub Releases](https://github.com/isirin1131/endtranslate/releases/latest) 下载 Apple Silicon 版应用；Intel Mac 请从源码构建。下载包采用本地签名，尚未经过 Apple 公证。
+
 ## 环境
 
 - macOS 14 或更新版本。
-- Swift Command Line Tools；运行自动测试需要带 Swift Testing 的 Swift 6 工具链。
+- 从源码构建需要 Swift Command Line Tools；运行自动测试需要带 Swift Testing 的 Swift 6 工具链。
 - 支持图片输入的 OpenAI 兼容接口，地址、模型和 API Key 在应用设置中填写。
 - 本机 Typst 用于中文与公式排版；不可用时译文以纯文本显示和导出。
 
@@ -48,7 +50,9 @@ zsh scripts/make-app.sh
 
 ## 阅读和翻译
 
-- 拖拽框选，按 Return 或点击“翻译”确认；Esc 取消。
+- 拖拽框选后，可以拖动四角或边缘调整范围，也可以拖动框内移动整个选区。按 Return 或点击“翻译”才会提交；Esc 或“取消”放弃选区。
+- 在顶部页码框输入页数，按 Return 跳转；⌘L 可直接选中页码。左右箭头按钮或 ⌥⌘← / ⌥⌘→ 切换上一页、下一页。页码从 PDF 的第一页开始计数。
+- 点击工具栏“目录”或按 ⌥⌘1 展开侧栏，点击章节跳转。支持分层目录；插入或收起译文后，目录仍定位到对应原文。没有内嵌目录的 PDF 可使用页码跳转。
 - 单击译文收起或展开，双击编辑；编辑器中按 ⌘Return 保存。
 - 按住 Option 拖拽，可以在已有译文上重新框选。
 - 右键可以重新翻译、拷贝、删除；删除支持 ⌘Z 撤销。
@@ -74,7 +78,7 @@ zsh scripts/make-app.sh
 zsh scripts/test.sh
 ```
 
-脚本自动处理 Command Line Tools 的 Testing 框架路径。测试使用临时文件和合成 PDF，不调用翻译 API，也不依赖 Typst。覆盖保存/删除失败与重试、损坏文件备份、PDF 校验、纯文本与矢量导出，以及错误/纯文本在不同缩放下的绘制方向与字号。权限测试需要普通用户运行；root 运行时会跳过这些用例。
+脚本自动处理 Command Line Tools 的 Testing 框架路径。31 项测试使用临时文件和合成 PDF，不调用翻译 API，也不依赖 Typst。覆盖保存/删除失败与重试、损坏文件备份、PDF 校验、纯文本与矢量导出、不同缩放下的文字绘制、选区移动和八方向缩放边界、页码校验、切换文档后的页码同步、分层目录，以及插入或移除译文后的跳转坐标。权限测试需要普通用户运行；root 运行时会跳过这些用例。
 
 完整设计和历史实现说明见 [PLAN.md](PLAN.md)。
 
