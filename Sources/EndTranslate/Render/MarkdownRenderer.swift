@@ -55,6 +55,7 @@ final class MarkdownRenderer: NSObject, WKNavigationDelegate {
         self.cacheDirectory = cacheDirectory ?? base.appendingPathComponent("\(application)/translations-v\(Self.cacheVersion)")
         super.init()
         try? FileManager.default.createDirectory(at: self.cacheDirectory, withIntermediateDirectories: true)
+        purgeLegacyCaches(base: base, application: application)
         purgeOldEntries()
     }
 
@@ -225,6 +226,20 @@ final class MarkdownRenderer: NSObject, WKNavigationDelegate {
             if let values = try? file.resourceValues(forKeys: [.contentModificationDateKey]),
                let date = values.contentModificationDate, date < cutoff {
                 try? FileManager.default.removeItem(at: file)
+            }
+        }
+    }
+
+    private func purgeLegacyCaches(base: URL, application: String) {
+        var candidates = [
+            base.appendingPathComponent("\(application)/typst"),
+            base.appendingPathComponent("EndTranslate/typst")
+        ]
+        let parent = cacheDirectory.deletingLastPathComponent()
+        candidates.append(parent.appendingPathComponent("typst"))
+        for dir in candidates {
+            if FileManager.default.fileExists(atPath: dir.path) {
+                try? FileManager.default.removeItem(at: dir)
             }
         }
     }

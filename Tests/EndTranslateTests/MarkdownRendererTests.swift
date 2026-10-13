@@ -102,4 +102,18 @@ final class MarkdownRendererTests {
             try await missing.render(markdown: "text", width: 300, fontSize: 10)
         }
     }
+
+    @Test func legacyTypstCacheIsPurgedOnStartup() throws {
+        let parentDir = FileManager.default.temporaryDirectory.appendingPathComponent("EndTranslateLegacyTest-\(UUID().uuidString)")
+        let legacyTypstDir = parentDir.appendingPathComponent("typst")
+        let dummyCacheDir = parentDir.appendingPathComponent("translations-v1")
+        try FileManager.default.createDirectory(at: legacyTypstDir, withIntermediateDirectories: true)
+        let sampleFile = legacyTypstDir.appendingPathComponent("sample.pdf")
+        try "dummy".write(to: sampleFile, atomically: true, encoding: .utf8)
+        #expect(FileManager.default.fileExists(atPath: sampleFile.path))
+
+        _ = MarkdownRenderer(cacheDirectory: dummyCacheDir)
+        #expect(!FileManager.default.fileExists(atPath: legacyTypstDir.path))
+        try? FileManager.default.removeItem(at: parentDir)
+    }
 }
