@@ -1,7 +1,11 @@
 #!/bin/zsh
 # Runs the offline regression suite with either Command Line Tools or Xcode.
-set -euo pipefail
 cd "${0:A:h}/.."
+
+if [[ -z "${CLANG_MODULE_CACHE_PATH:-}" ]]; then
+  export CLANG_MODULE_CACHE_PATH="$PWD/.build/module-cache"
+fi
+mkdir -p "$CLANG_MODULE_CACHE_PATH"
 
 et_frameworks="$(xcode-select -p)/Library/Developer/Frameworks"
 et_testing_flags=()

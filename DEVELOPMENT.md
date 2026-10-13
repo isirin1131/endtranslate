@@ -53,3 +53,5 @@ zsh scripts/make-app.sh
 ```
 
 回归使用 Swift Testing，包括真实 WebKit 排版；不需要 Xcode 的 XCTest 运行时。窗口验收使用合成 PDF、本地模拟翻译接口和独立 bundle ID，避免接触真实 API Key 或阅读资料。验证重点包括公式与正文布局、编辑后重新排版、现有译注重新打开、多个请求并行返回，以及导出 PDF 中的文字和矢量公式。
+
+在受限环境或沙箱中执行构建/测试若出现模块缓存或嵌套沙箱权限报错（`Operation not permitted`），可为 `swift` 命令添加 `--disable-sandbox` 参数，或设置 `export CLANG_MODULE_CACHE_PATH=.build/module-cache` 隔离 Clang 模块缓存路径。
