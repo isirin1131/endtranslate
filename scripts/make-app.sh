@@ -25,6 +25,12 @@ cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp LICENSE "$APP/Contents/Resources/LICENSE"
 cp -R Sources/EndTranslate/Resources/Renderer "$APP/Contents/Resources/Renderer"
 cp THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
+
+if [[ ! -f "$APP/Contents/Resources/Renderer/index.html" ]]; then
+  echo "Error: missing Renderer resources in $APP" >&2
+  exit 1
+fi
+
 codesign --force --sign - "$APP" >/dev/null
 echo "built $APP"
 
