@@ -12,11 +12,17 @@ struct AnnotationEditorView: View {
     @ObservedObject var model: PDFViewModel
     @Environment(\.dismiss) private var dismiss
 
-    @State private var draft: String = ""
+    @State private var draft: String
     @State private var preview: NSImage?
     @State private var previewError: String?
     @State private var rendering = false
-    @State private var width: CGFloat = 260
+    private var width: CGFloat { min(max(session.previewWidth, 180), 460) }
+
+    init(session: AnnotationEditSession, model: PDFViewModel) {
+        self.session = session
+        self.model = model
+        _draft = State(initialValue: session.draft)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,7 +30,7 @@ struct AnnotationEditorView: View {
                 Text("编辑译文 — 第 \(session.pageIndex + 1) 页")
                     .font(.headline)
                 Spacer()
-                Text("支持 markdown 与 LaTeX：$x^2$ / $$\\int_0^1 x\\,dx$$")
+                Text(verbatim: "支持 Markdown 与 LaTeX：$x^2$ / $$\\int_0^1 x\\,dx$$")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -35,7 +41,7 @@ struct AnnotationEditorView: View {
 
             HSplitView {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Markdown 原文")
+                    Text("译文内容")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     TextEditor(text: $draft)
@@ -46,7 +52,7 @@ struct AnnotationEditorView: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Text("渲染预览")
+                        Text("排版预览")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if rendering { ProgressView().controlSize(.small) }
@@ -111,14 +117,7 @@ struct AnnotationEditorView: View {
             .padding(12)
         }
         .frame(minWidth: 860, idealWidth: 980, minHeight: 540)
-        .onAppear {
-            draft = session.draft
-            width = min(max(session.previewWidth, 180), 460)
-        }
         .task(id: draft) {
-            await refreshPreview()
-        }
-        .task(id: width) {
             await refreshPreview()
         }
     }
@@ -126,16 +125,17 @@ struct AnnotationEditorView: View {
     private func refreshPreview() async {
         let source = draft
         rendering = true
-        defer { rendering = false }
+        defer { if !Task.isCancelled { rendering = false } }
         try? await Task.sleep(nanoseconds: 350_000_000)
         if Task.isCancelled { return }
-        if let doc = try? await TypstRenderer.shared.render(markdown: source, width: width, fontSize: 10),
-           let image = doc.nsImage(scale: 2) {
+        let doc = try? await MarkdownRenderer.shared.render(markdown: source, width: width, fontSize: 10)
+        guard !Task.isCancelled else { return }
+        if let image = doc?.nsImage(scale: 2) {
             preview = image
             previewError = nil
         } else {
             preview = nil
-            previewError = "typst 渲染失败，保存后将退化为纯文本"
+            previewError = "排版预览暂不可用，保存后会保留译文文本"
         }
     }
 }

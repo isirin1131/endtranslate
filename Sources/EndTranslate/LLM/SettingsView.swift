@@ -61,23 +61,9 @@ struct SettingsView: View {
                     Spacer(minLength: 0)
                 }
             }
-
-            Section("公式渲染") {
-                LabeledContent("typst") {
-                    if let path = TypstRenderer.shared.executablePath {
-                        Label(path, systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                            .labelStyle(TintedIconLabelStyle(tint: .green))
-                    } else {
-                        Label("未找到，公式将以纯文本显示（brew install typst）", systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.secondary)
-                            .labelStyle(TintedIconLabelStyle(tint: .orange))
-                    }
-                }
-            }
         }
         .formStyle(.grouped)
-        .frame(width: 520, height: 420)
+        .frame(width: 520, height: 340)
         .onChange(of: settings.baseURL) { testResult = nil }
         .onChange(of: settings.apiKey) { testResult = nil }
         .onChange(of: settings.model) { testResult = nil }
@@ -121,19 +107,5 @@ struct SettingsView: View {
         (text as NSString).draw(at: NSPoint(x: 10, y: 40), withAttributes: attrs)
         NSGraphicsContext.restoreGraphicsState()
         return rep.representation(using: .png, properties: [:])!
-    }
-}
-
-/// Colored icon, secondary text.
-private struct TintedIconLabelStyle: LabelStyle {
-    let tint: Color
-
-    func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 5) {
-            configuration.icon.foregroundStyle(tint)
-            configuration.title
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
     }
 }

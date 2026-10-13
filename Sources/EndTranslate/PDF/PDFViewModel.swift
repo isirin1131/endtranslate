@@ -219,11 +219,11 @@ final class PDFViewModel: ObservableObject {
             let annotation = TranslationAnnotation(model: model)
             // An empty translation was in flight or failed when the app last closed.
             annotation.status = model.translationMd.isEmpty ? .failed("上次未完成") : .done
-            annotation.fallbackText = MarkdownToTypst.plainText(model.translationMd)
+            annotation.fallbackText = MarkdownText.plainText(model.translationMd)
             store.add(model, view: annotation)
             return annotation
         }
-        // Give notes valid bounds immediately, including when exporting before typst finishes.
+        // Give notes valid bounds immediately, including when exporting before typesetting finishes.
         for page in Set(models.map(\.page)).sorted() { relayout(page: page) }
         Task {
             for chunk in stride(from: 0, to: annotations.count, by: 4).map({ Array(annotations[$0..<min($0 + 4, annotations.count)]) }) {
@@ -587,21 +587,24 @@ final class PDFViewModel: ObservableObject {
                         self?.settingsRequest += 1
                     }
                 }
-                Log.write("translation failed: \(error)")
+                Log.write("translation failed (\((error as NSError).domain), \((error as NSError).code))")
             }
         }
     }
 
-    /// Compiles the translation with typst at the selection's width; the slot height follows the result.
+    /// Typesets Markdown/LaTeX at the selection's width; the slot follows the result's height.
     func render(_ annotation: TranslationAnnotation, markdown: String) async {
         let pageWidth = originalDocument?.page(at: annotation.model.page)?.bounds(for: pdfView?.displayBox ?? .cropBox).width ?? 600
         let width = min(max(annotation.model.rect.width, 140), max(pageWidth - 4, 40))
-        if let doc = try? await TypstRenderer.shared.render(markdown: markdown, width: width, fontSize: 10) {
+        let doc = try? await MarkdownRenderer.shared.render(markdown: markdown, width: width, fontSize: 10)
+        guard store.view(for: annotation.model.id) === annotation,
+              annotation.model.translationMd == markdown else { return }
+        if let doc {
             annotation.rendered = doc
             annotation.fallbackText = nil
         } else {
             annotation.rendered = nil
-            annotation.fallbackText = MarkdownToTypst.plainText(markdown)
+            annotation.fallbackText = MarkdownText.plainText(markdown)
         }
     }
 
@@ -658,6 +661,9 @@ final class PDFViewModel: ObservableObject {
         scheduleSave()
         annotation.status = .done
         annotation.showsOriginal = false
+        annotation.rendered = nil
+        annotation.fallbackText = MarkdownText.plainText(session.draft)
+        relayout(page: annotation.model.page, anchor: anchor(for: annotation.model))
         Task {
             await render(annotation, markdown: session.draft)
             guard store.view(for: session.id) === annotation else { return }

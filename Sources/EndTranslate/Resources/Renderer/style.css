@@ -1,0 +1,30 @@
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: #fff; color: #171717; }
+#translation {
+  margin: 0;
+  padding: 4px;
+  font-family: "Times New Roman", "PingFang SC", "Songti SC", serif;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+#translation > :first-child { margin-top: 0; }
+#translation > :last-child { margin-bottom: 0; }
+p { margin: 0 0 .55em; }
+h1, h2, h3, h4, h5, h6 { margin: .65em 0 .25em; font-size: 1.1em; line-height: 1.4; }
+ul, ol { margin: .35em 0 .55em; padding-left: 1.5em; }
+li { margin: .15em 0; }
+li > p { margin-bottom: .25em; }
+blockquote { margin: .5em 0; padding: 0 .6em; border-left: 1px solid #bbb; }
+hr { border: 0; border-top: .5px solid #bbb; margin: .7em 0; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; margin: .5em 0; }
+td, th { padding: 3px; border: .5px solid #ccc; vertical-align: top; }
+th { background: #f0f0f0; text-align: left; }
+code, pre { font-family: Menlo, monospace; font-size: .9em; background: #f4f4f4; }
+code { padding: 1px 2px; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 4px; margin: .5em 0; }
+pre > code { padding: 0; font-size: 1em; background: transparent; }
+.math-source[data-display="true"] { display: block; margin: .45em 0; text-align: center; }
+mjx-container[display="true"] { margin: 0 !important; }
+.math-error { font-family: Menlo, monospace; font-size: .9em; color: #8c4a15; white-space: pre-wrap; }
+del { color: #555; }

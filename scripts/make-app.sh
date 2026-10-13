@@ -23,6 +23,8 @@ cp "$BIN" "$APP/Contents/MacOS/EndTranslate"
 cp scripts/Info.plist "$APP/Contents/Info.plist"
 cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp LICENSE "$APP/Contents/Resources/LICENSE"
+cp -R Sources/EndTranslate/Resources/Renderer "$APP/Contents/Resources/Renderer"
+cp THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/THIRD_PARTY_NOTICES.md"
 codesign --force --sign - "$APP" >/dev/null
 echo "built $APP"
 

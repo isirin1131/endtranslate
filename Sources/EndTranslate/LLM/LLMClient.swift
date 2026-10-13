@@ -19,7 +19,7 @@ struct LLMClient {
 
         var errorDescription: String? {
             switch self {
-            case .notConfigured: return "尚未设置 API Key"
+            case .notConfigured: return "翻译服务尚未配置完整"
             case .badURL: return "Base URL 无效"
             case .http(let code, let body):
                 let detail = Self.serverMessage(body).map { "：\($0)" } ?? ""
@@ -147,17 +147,17 @@ struct LLMClient {
             max_tokens: 4096
         )
         request.httpBody = try JSONEncoder().encode(body)
-        Log.write("LLM → \(url.absoluteString) model=\(settings.model) image=\(imagePNG.count / 1024)KB")
+        Log.write("LLM request: image=\(imagePNG.count / 1024)KB")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw LLMError.emptyResponse }
         guard (200..<300).contains(http.statusCode) else {
             let snippet = String(data: data.prefix(500), encoding: .utf8) ?? ""
-            Log.write("LLM HTTP \(http.statusCode): \(snippet)")
+            Log.write("LLM HTTP \(http.statusCode)")
             throw LLMError.http(http.statusCode, snippet)
         }
         let decoded = try JSONDecoder().decode(Response.self, from: data)
         guard let text = decoded.choices.first?.message.content, !text.isEmpty else {
-            Log.write("LLM empty/unexpected response: \(String(data: data.prefix(300), encoding: .utf8) ?? "")")
+            Log.write("LLM empty/unexpected response")
             throw LLMError.emptyResponse
         }
         Log.write("LLM OK, \(text.count) chars")

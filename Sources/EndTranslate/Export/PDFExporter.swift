@@ -66,7 +66,7 @@ enum PDFExporter {
         if let rendered = overlay.rendered {
             rendered.draw(in: rect, context: context)
         } else {
-            let text = overlay.fallbackText ?? MarkdownToTypst.plainText(overlay.model.translationMd)
+            let text = overlay.fallbackText ?? MarkdownText.plainText(overlay.model.translationMd)
             TranslationAnnotation.drawText(text, color: .black, in: rect.insetBy(dx: 3, dy: 3), context: context)
         }
         context.setFillColor(CGColor(red: 0.2, green: 0.45, blue: 0.95, alpha: 0.55))

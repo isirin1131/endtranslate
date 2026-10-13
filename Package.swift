@@ -7,7 +7,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "EndTranslate",
-            path: "Sources/EndTranslate"
+            path: "Sources/EndTranslate",
+            resources: [.copy("Resources/Renderer")]
         ),
         .testTarget(
             name: "EndTranslateTests",

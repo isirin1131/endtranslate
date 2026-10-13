@@ -135,8 +135,8 @@ private struct EmptyStateView: View {
             .controlSize(.large)
 
             HStack(spacing: 18) {
-                Tip(symbol: "rectangle.dashed", text: "拖拽框选 → 翻译")
-                Tip(symbol: "cursorarrow.click", text: "单击切换原文")
+                Tip(symbol: "rectangle.dashed", text: "框选 → 调整 → 确认")
+                Tip(symbol: "cursorarrow.click", text: "单击收起或展开")
                 Tip(symbol: "cursorarrow.click.2", text: "双击编辑译文")
                 Tip(symbol: "option", text: "⌥ 拖拽可在译文上框选")
             }

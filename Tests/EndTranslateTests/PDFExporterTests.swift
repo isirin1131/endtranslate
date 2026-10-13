@@ -75,9 +75,8 @@ final class PDFExporterTests {
 
     @Test func vectorTranslationAndOriginalContentArePreserved() throws {
         let note = annotation("VECTOR_TRANSLATION")
-        note.rendered = RenderedDoc(
-            pdfData: pdf(["VECTOR_TRANSLATION"], box: CGRect(x: 0, y: 0, width: 300, height: 75)),
-            key: "test", typstSource: ""
+        note.rendered = RenderedTranslation(
+            pdfData: pdf(["VECTOR_TRANSLATION"], box: CGRect(x: 0, y: 0, width: 300, height: 75))
         )
         let output = try export([note])
         let text = try #require(output.string)
@@ -92,9 +91,8 @@ final class PDFExporterTests {
         let loading = annotation("LOADINGTRANSLATION")
         loading.status = .loading
         // A retry can still have a previous rendered result attached.
-        loading.rendered = RenderedDoc(
-            pdfData: pdf(["STALE_RESULT"], box: CGRect(x: 0, y: 0, width: 300, height: 75)),
-            key: "stale", typstSource: ""
+        loading.rendered = RenderedTranslation(
+            pdfData: pdf(["STALE_RESULT"], box: CGRect(x: 0, y: 0, width: 300, height: 75))
         )
         let failed = annotation("FAILEDTRANSLATION")
         failed.status = .failed("请求超时")

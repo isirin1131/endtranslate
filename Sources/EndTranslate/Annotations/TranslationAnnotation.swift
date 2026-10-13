@@ -1,7 +1,7 @@
-import PDFKit
+import AppKit
 import CoreText
 
-final class TranslationAnnotation: PDFAnnotation {
+final class TranslationAnnotation {
     enum Status: Equatable {
         case loading
         case done
@@ -9,11 +9,12 @@ final class TranslationAnnotation: PDFAnnotation {
     }
 
     var model: Annotation
+    var bounds: CGRect = .zero
     var status: Status = .loading
     /// Collapses the gap to a thin handle so the page reads like the original.
     var showsOriginal = false
-    var rendered: RenderedDoc?
-    /// Plain-text fallback when typst fails.
+    var rendered: RenderedTranslation?
+    /// Plain-text fallback while vector typesetting is unavailable.
     var fallbackText: String?
 
     static let margin: CGFloat = 3
@@ -21,16 +22,9 @@ final class TranslationAnnotation: PDFAnnotation {
 
     init(model: Annotation) {
         self.model = model
-        super.init(bounds: .zero, forType: .stamp, withProperties: nil)
     }
 
-    required init?(coder: NSCoder) { fatalError("not supported") }
-
-    func refresh() {
-        SelectionOverlay.requestInvalidate()
-    }
-
-    /// Text shown when there is no typst page to draw.
+    /// Text shown when there is no rendered translation to draw.
     var displayText: String {
         switch status {
         case .loading: return "翻译中…"
@@ -79,7 +73,7 @@ final class TranslationAnnotation: PDFAnnotation {
         }
     }
 
-    /// Height with the fallback text renderer; used before the typst page is ready.
+    /// Height with the fallback text renderer; used before vector typesetting is ready.
     static func measuredHeight(text: String, width: CGFloat, fontSize: CGFloat) -> CGFloat {
         let attrString = NSAttributedString(
             string: text,
