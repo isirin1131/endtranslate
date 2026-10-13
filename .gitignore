@@ -2,7 +2,8 @@
 .build/
 build/
 .swiftpm/
-.qoder/settings.local.json
+.qoder/
+node_modules/
 *.log
 
 # Local API settings and reading materials.

@@ -4,24 +4,23 @@
 
 A native macOS PDF reader with inline translation, LaTeX math rendering, and annotated PDF export. Built with SwiftUI, AppKit, and PDFKit.
 
-当前版本 **1.0.0**。可从 [GitHub Releases](https://github.com/isirin1131/endtranslate/releases/latest) 下载 Apple Silicon 版应用；Intel Mac 请从源码构建。下载包采用本地签名，尚未经过 Apple 公证。
+当前版本 **1.1.0**。可从 [GitHub Releases](https://github.com/isirin1131/endtranslate/releases/latest) 下载 Apple Silicon 版应用；Intel Mac 请从源码构建。下载包采用本地签名，尚未经过 Apple 公证。
 
 ## 环境
 
 - macOS 14 或更新版本。
 - 从源码构建需要 Swift Command Line Tools；运行自动测试需要带 Swift Testing 的 Swift 6 工具链。
 - 支持图片输入的 OpenAI 兼容接口，地址、模型和 API Key 在应用设置中填写。
-- 本机 Typst 用于中文与公式排版；不可用时译文以纯文本显示和导出。
+- Markdown 和 LaTeX 公式在应用内排版，无需安装额外工具或下载字体。
 
-应用不依赖第三方 Swift 包，也不需要完整 Xcode。Typst 首次排版可能需要下载 `@preview/mitex:0.2.7`。
+应用使用系统自带的 PDFKit 和 WebKit，内置 Markdown 解析器、MathJax 和数学字体。公式渲染资源随应用提供，不访问 CDN。
 
 ## 构建和运行
 
-先安装 Command Line Tools；需要公式排版时，使用 Homebrew 安装 Typst：
+从源码构建时，先安装 Command Line Tools：
 
 ```sh
 xcode-select --install
-brew install typst
 ```
 
 获取源码：
@@ -70,7 +69,17 @@ zsh scripts/make-app.sh
 
 如果已有译注损坏、属于另一个 PDF 版本，或使用了应用不支持的数据版本，应用会提示并保留原文件。再次保存前，先备份为 `.etr.json.bak`；已有备份不会被覆盖，后续备份使用 `.bak.1`、`.bak.2` 等后缀。备份失败时不会覆盖原译注。
 
-导出包含当前展开且已完成的译文，包括 Typst 不可用时的纯文本译文；收起、翻译中或失败的译文不写入导出的 PDF。
+导出包含当前展开且已完成的译文，正文和公式保持矢量。排版暂不可用时仍可导出译文文本；收起、翻译中或失败的译文不写入导出的 PDF。
+
+## 公式与排版
+
+正文使用 Markdown，公式使用 LaTeX：行内 `$...$` 或 `\(...\)`，独立公式 `$$...$$` 或 `\[...\]`。支持常见数学环境、分式、矩阵、求和、积分和公式编号标记。代码块中的公式示例保持原样。
+
+模型输出、编辑器内容和译注文件使用同一种格式。正文由 markdown-it 解析，公式由 MathJax 直接排版成 SVG，再由系统 WebKit 生成矢量译文。阅读、编辑预览和 PDF 导出使用同一份排版结果。
+
+不支持的公式会显示其 LaTeX 源码，其余公式和正文继续正常排版。支持范围是 MathJax 的数学语法；自定义 TeX 宏包和完整 LaTeX 文档不属于输入格式。译文中的 HTML 按文字显示，外部图片不会下载。
+
+已有 `.etr.json` 译注可直接打开，无需重译或转换。
 
 ## 回归测试
 
@@ -78,10 +87,10 @@ zsh scripts/make-app.sh
 zsh scripts/test.sh
 ```
 
-脚本自动处理 Command Line Tools 的 Testing 框架路径。31 项测试使用临时文件和合成 PDF，不调用翻译 API，也不依赖 Typst。覆盖保存/删除失败与重试、损坏文件备份、PDF 校验、纯文本与矢量导出、不同缩放下的文字绘制、选区移动和八方向缩放边界、页码校验、切换文档后的页码同步、分层目录，以及插入或移除译文后的跳转坐标。权限测试需要普通用户运行；root 运行时会跳过这些用例。
+脚本自动处理 Command Line Tools 的 Testing 框架路径。测试使用临时文件和合成 PDF，不调用翻译 API。覆盖保存与恢复、文本和矢量导出、缩放与坐标、可调整选区、页码和目录导航，以及真实 WebKit 公式渲染、并发排版和缓存。权限测试需要普通用户运行；root 运行时会跳过这些用例。
 
-完整设计和历史实现说明见 [PLAN.md](PLAN.md)。
+当前架构、资源更新方式和验证流程见 [DEVELOPMENT.md](DEVELOPMENT.md)。
 
 ## 许可证
 
-源码使用 [MIT License](LICENSE)。Typst 和 mitex 作为外部工具使用，遵循各自的许可证。
+应用源码使用 [MIT License](LICENSE)。内置第三方组件及其许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
