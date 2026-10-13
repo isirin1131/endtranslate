@@ -116,4 +116,23 @@ final class MarkdownRendererTests {
         #expect(!FileManager.default.fileExists(atPath: legacyTypstDir.path))
         try? FileManager.default.removeItem(at: parentDir)
     }
+
+    @Test func tamperedResourceFailsVerificationAndThrows() async throws {
+        let realResources = Bundle.main.url(forResource: "Renderer", withExtension: nil)
+            ?? Bundle.module.url(forResource: "Renderer", withExtension: nil)
+        let resourcesURL = try #require(realResources)
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("EndTranslateTamperTest-\(UUID().uuidString)")
+        try FileManager.default.copyItem(at: resourcesURL, to: tempDir)
+
+        let targetFile = tempDir.appendingPathComponent("style.css")
+        var content = try String(contentsOf: targetFile, encoding: .utf8)
+        content.append("\n/* tampered */\n")
+        try content.write(to: targetFile, atomically: true, encoding: .utf8)
+
+        let tamperedRenderer = MarkdownRenderer(resources: tempDir, cacheDirectory: directory)
+        await #expect(throws: MarkdownRenderError.self) {
+            try await tamperedRenderer.render(markdown: "test", width: 300, fontSize: 10)
+        }
+        try? FileManager.default.removeItem(at: tempDir)
+    }
 }

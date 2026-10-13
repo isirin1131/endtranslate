@@ -44,6 +44,7 @@ final class MarkdownRenderer: NSObject, WKNavigationDelegate {
     private var idleTask: Task<Void, Never>?
     private var webView: WKWebView?
     private var navigationCompletion: (@Sendable (Result<Void, Error>) -> Void)?
+    private var resourcesVerified: Bool?
 
     init(resources: URL? = nil, cacheDirectory: URL? = nil) {
         self.resources = resources
@@ -55,6 +56,7 @@ final class MarkdownRenderer: NSObject, WKNavigationDelegate {
         self.cacheDirectory = cacheDirectory ?? base.appendingPathComponent("\(application)/translations-v\(Self.cacheVersion)")
         super.init()
         try? FileManager.default.createDirectory(at: self.cacheDirectory, withIntermediateDirectories: true)
+        _ = areResourcesValid()
         purgeLegacyCaches(base: base, application: application)
         purgeOldEntries()
     }
@@ -134,9 +136,46 @@ final class MarkdownRenderer: NSObject, WKNavigationDelegate {
         return rendered
     }
 
+    private struct Manifest: Decodable {
+        let sha256: [String: String]
+    }
+
+    private func verifyResources(at url: URL) -> Bool {
+        let manifestURL = url.appendingPathComponent("manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL),
+              let manifest = try? JSONDecoder().decode(Manifest.self, from: data) else {
+            Log.write("Renderer manifest missing or unreadable at \(manifestURL.path)")
+            return false
+        }
+        for (relativePath, expectedHash) in manifest.sha256 {
+            let fileURL = url.appendingPathComponent(relativePath)
+            guard let fileData = try? Data(contentsOf: fileURL) else {
+                Log.write("Renderer resource missing: \(relativePath)")
+                return false
+            }
+            let actualHash = SHA256.hash(data: fileData).map { String(format: "%02x", $0) }.joined()
+            if actualHash != expectedHash {
+                Log.write("Renderer resource hash mismatch for \(relativePath): expected \(expectedHash), got \(actualHash)")
+                return false
+            }
+        }
+        return true
+    }
+
+    private func areResourcesValid() -> Bool {
+        if let resourcesVerified { return resourcesVerified }
+        guard let resources else {
+            resourcesVerified = false
+            return false
+        }
+        let valid = verifyResources(at: resources)
+        resourcesVerified = valid
+        return valid
+    }
+
     private func engine() async throws -> WKWebView {
         if let webView { return webView }
-        guard let resources else { throw MarkdownRenderError.resourcesMissing }
+        guard areResourcesValid(), let resources else { throw MarkdownRenderError.resourcesMissing }
         let index = resources.appendingPathComponent("index.html")
         guard FileManager.default.fileExists(atPath: index.path) else { throw MarkdownRenderError.resourcesMissing }
         let configuration = WKWebViewConfiguration()
