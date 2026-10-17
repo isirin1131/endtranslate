@@ -17,18 +17,17 @@ struct PDFNavigationTarget: Equatable {
         return number - 1
     }
 
-    func destination(in document: PDFDocument, layout: GapLayout, box: PDFDisplayBox = .cropBox) -> PDFDestination? {
+    func destination(in document: PDFDocument, box: PDFDisplayBox = .cropBox) -> PDFDestination? {
         guard pageIndex >= 0, pageIndex < document.pageCount, let page = document.page(at: pageIndex) else { return nil }
-        var originalBounds = page.bounds(for: box)
-        originalBounds.size.height -= layout.totalHeight
-        guard originalBounds.width > 0, originalBounds.height > 0 else { return nil }
+        let bounds = page.bounds(for: box)
+        guard bounds.width > 0, bounds.height > 0 else { return nil }
         func coordinate(_ value: CGFloat?, fallback: CGFloat, min lower: CGFloat, max upper: CGFloat) -> CGFloat {
             guard let value, value.isFinite, value != kPDFDestinationUnspecifiedValue else { return fallback }
             return min(max(value, lower), upper)
         }
-        let x = coordinate(point?.x, fallback: originalBounds.minX, min: originalBounds.minX, max: originalBounds.maxX)
-        let y = coordinate(point?.y, fallback: originalBounds.maxY, min: originalBounds.minY, max: originalBounds.maxY)
-        let destination = PDFDestination(page: page, at: CGPoint(x: x, y: layout.expand(y)))
+        let x = coordinate(point?.x, fallback: bounds.minX, min: bounds.minX, max: bounds.maxX)
+        let y = coordinate(point?.y, fallback: bounds.maxY, min: bounds.minY, max: bounds.maxY)
+        let destination = PDFDestination(page: page, at: CGPoint(x: x, y: y))
         destination.zoom = kPDFDestinationUnspecifiedValue
         return destination
     }

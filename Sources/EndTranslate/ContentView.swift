@@ -86,12 +86,6 @@ struct ContentView: View {
             }
             .disabled(model.document == nil)
 
-            Button { model.toggleAllTranslations() } label: {
-                Label("收起/展开译文", systemImage: "translate")
-            }
-            .help("收起或展开全部译文（⇧⌘T）")
-            .disabled(model.document == nil)
-
             Button { model.exportAnnotatedPDF() } label: {
                 Label("导出", systemImage: "square.and.arrow.up")
             }
@@ -122,7 +116,7 @@ private struct EmptyStateView: View {
             VStack(spacing: 6) {
                 Text("拖入 PDF 开始阅读")
                     .font(.title2.weight(.semibold))
-                Text("在页面上框选任意段落，译文会出现在原文上方")
+                Text("在页面上框选任意段落，译文卡片将显示在右侧栏并与原文连线")
                     .foregroundStyle(.secondary)
             }
 
@@ -136,9 +130,8 @@ private struct EmptyStateView: View {
 
             HStack(spacing: 18) {
                 Tip(symbol: "rectangle.dashed", text: "框选 → 调整 → 确认")
-                Tip(symbol: "cursorarrow.click", text: "单击收起或展开")
+                Tip(symbol: "point.topleft.down.curvedto.point.bottomright.up", text: "侧栏卡片随原文同步滚动")
                 Tip(symbol: "cursorarrow.click.2", text: "双击编辑译文")
-                Tip(symbol: "option", text: "⌥ 拖拽可在译文上框选")
             }
             .font(.caption)
             .foregroundStyle(.secondary)

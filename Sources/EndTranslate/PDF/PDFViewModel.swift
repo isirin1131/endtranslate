@@ -30,16 +30,13 @@ final class PDFViewModel: ObservableObject {
     @Published var settingsRequest = 0
 
     let store = AnnotationStore()
-    /// Untouched copy: source for screenshots and for re-slicing pages when gaps change.
-    /// `document` is the displayed copy whose pages get replaced by gapped versions.
-    private var originalDocument: PDFDocument?
-    /// Keeps the one-page documents backing replaced pages alive.
-    private var pageSources: [Int: PDFDocument] = [:]
     private(set) var fileURL: URL?
     private var persistence: AnnotationPersistence?
     private var saveTask: Task<Void, Never>?
     private var positionRestored = false
     private var positionTask: Task<Void, Never>?
+    private var sidebarRenderTask: Task<Void, Never>?
+    private var lastRenderedMaxInnerWidth: CGFloat = TranslationAnnotation.defaultRenderWidth
     private var toastTask: Task<Void, Never>?
     weak var pdfView: PDFView?
     weak var undoManager: UndoManager?
@@ -120,7 +117,7 @@ final class PDFViewModel: ObservableObject {
             }
             return
         }
-        guard let doc = PDFDocument(url: url), let original = PDFDocument(url: url) else {
+        guard let doc = PDFDocument(url: url) else {
             show("无法打开 \(url.lastPathComponent)", isError: true)
             return
         }
@@ -136,10 +133,8 @@ final class PDFViewModel: ObservableObject {
 
         let session = AnnotationPersistence(pdfURL: url)
         persistence = session
-        originalDocument = original
-        outline = PDFOutlineEntry.read(from: original)
+        outline = PDFOutlineEntry.read(from: doc)
         selectedOutlineID = nil
-        pageSources.removeAll()
         document = doc
         fileURL = url
         fileName = url.lastPathComponent
@@ -223,8 +218,7 @@ final class PDFViewModel: ObservableObject {
             store.add(model, view: annotation)
             return annotation
         }
-        // Give notes valid bounds immediately, including when exporting before typesetting finishes.
-        for page in Set(models.map(\.page)).sorted() { relayout(page: page) }
+        SelectionOverlay.requestInvalidate()
         Task {
             for chunk in stride(from: 0, to: annotations.count, by: 4).map({ Array(annotations[$0..<min($0 + 4, annotations.count)]) }) {
                 guard self.persistence === session else { return }
@@ -239,7 +233,7 @@ final class PDFViewModel: ObservableObject {
                 }
             }
             guard self.persistence === session else { return }
-            for page in Set(models.map(\.page)).sorted() { relayout(page: page) }
+            SelectionOverlay.requestInvalidate()
         }
     }
 
@@ -282,9 +276,9 @@ final class PDFViewModel: ObservableObject {
 
     private func navigate(to target: PDFNavigationTarget) -> Bool {
         guard let view = pdfView, let document,
-              let destination = target.destination(in: document, layout: store.layout(for: target.pageIndex),
-                                                   box: view.displayBox) else { return false }
-        view.subviews.compactMap { $0 as? SelectionOverlay }.forEach { $0.clearPending() }
+              let destination = target.destination(in: document, box: view.displayBox) else { return false }
+        let overlays = (view.superview?.subviews ?? []) + view.subviews
+        overlays.compactMap { $0 as? SelectionOverlay }.forEach { $0.clearPending() }
         view.go(to: destination)
         currentPageIndex = target.pageIndex
         savePosition()
@@ -349,6 +343,9 @@ final class PDFViewModel: ObservableObject {
         }
         // Title-bar proxy icon: ⌘-click shows the path, drag it like the file itself.
         window.representedURL = url
+        if window.firstResponder === window || window.firstResponder == nil {
+            window.makeFirstResponder(view)
+        }
         defer {
             positionRestored = true
             refreshCurrentPage()
@@ -364,79 +361,20 @@ final class PDFViewModel: ObservableObject {
         scroll(toTop: (position.page, CGPoint(x: position.x, y: position.y)))
     }
 
-    /// Scrolls so an original-coordinate point sits at the top of the viewport.
+    /// Scrolls so a page-coordinate point sits at the top of the viewport.
     private func scroll(toTop pin: (page: Int, point: CGPoint)) {
         guard let view = pdfView, let dv = view.documentView,
               let clip = dv.enclosingScrollView?.contentView,
-              let p = documentPoint(page: pin.page, original: pin.point) else { return }
+              let p = documentPoint(page: pin.page, point: pin.point) else { return }
         var origin = clip.bounds.origin
         origin.y = dv.isFlipped ? p.y : p.y - clip.bounds.height
         origin.y = min(max(origin.y, 0), max(dv.bounds.height - clip.bounds.height, 0))
         dv.scroll(origin)
     }
 
-    // MARK: gap layout
-
-    /// Re-slices one page so every annotation on it gets a slot right above its selection,
-    /// swaps the page into the displayed document and positions the boxes in their slots.
-    /// `anchor` (original page coordinates) stays fixed on screen; defaults to the viewport top.
-    func relayout(page index: Int, anchor: (page: Int, point: CGPoint)? = nil) {
-        guard let doc = document, let original = originalDocument,
-              let source = original.page(at: index), let view = pdfView else { return }
-        let box = view.displayBox
-        let pageBounds = source.bounds(for: box)
-        let annotations = store.annotations.filter { $0.page == index }.compactMap { store.view(for: $0.id) }
-        let layout = GapLayout(annotations.map {
-            PageGap(id: $0.model.id, y: min($0.model.rect.maxY, pageBounds.maxY), height: $0.gapHeight(pageWidth: pageBounds.width))
-        })
-        let oldLayout = store.layout(for: index)
-
-        let pin = anchor ?? viewportTopAnchor()
-        let before = pin.flatMap { documentPoint(page: $0.page, original: $0.point) }
-        let clip = view.documentView?.enclosingScrollView?.contentView
-        let origin = clip?.bounds.origin
-
-        let replacement: PDFPage?
-        if layout.gaps.isEmpty && oldLayout.gaps.isEmpty {
-            replacement = nil
-        } else if layout.gaps.isEmpty {
-            replacement = source.copy() as? PDFPage
-            pageSources[index] = nil
-        } else if let built = PageGapper.build(from: source, layout: layout, box: box) {
-            replacement = built.page
-            pageSources[index] = built.document
-        } else {
-            Log.write("gap rebuild failed page=\(index)")
-            return
-        }
-        store.setLayout(layout, for: index)
-        if let replacement, index < doc.pageCount {
-            doc.removePage(at: index)
-            doc.insert(replacement, at: index)
-            view.layoutDocumentView()
-        }
-        let expandedBounds = CGRect(x: pageBounds.minX, y: pageBounds.minY,
-                                    width: pageBounds.width, height: pageBounds.height + layout.totalHeight)
-        for annotation in annotations {
-            guard let slot = layout.slot(for: annotation.model.id) else { continue }
-            annotation.place(slotMinY: slot.minY, slotHeight: slot.height, pageBounds: expandedBounds)
-        }
-
-        if let pin, let before, let after = documentPoint(page: pin.page, original: pin.point),
-           let clip, let origin, let dv = view.documentView {
-            var target = origin
-            target.y += after.y - before.y
-            target.y = min(max(target.y, 0), max(dv.bounds.height - clip.bounds.height, 0))
-            dv.scroll(target)
-        }
-        SelectionOverlay.requestInvalidate()
-    }
-
-    /// An original-coordinate point in documentView coordinates, under the current layout.
-    private func documentPoint(page index: Int, original point: CGPoint) -> CGPoint? {
+    private func documentPoint(page index: Int, point: CGPoint) -> CGPoint? {
         guard let view = pdfView, let dv = view.documentView, let page = document?.page(at: index) else { return nil }
-        let expanded = CGPoint(x: point.x, y: store.layout(for: index).expand(point.y))
-        return dv.convert(view.convert(expanded, from: page), from: view)
+        return dv.convert(view.convert(point, from: page), from: view)
     }
 
     private func viewportTopAnchor() -> (page: Int, point: CGPoint)? {
@@ -445,14 +383,8 @@ final class PDFViewModel: ObservableObject {
         guard let page = view.page(for: top, nearest: true) else { return nil }
         let index = doc.index(for: page)
         guard index != NSNotFound else { return nil }
-        var p = view.convert(top, to: page)
-        p.y = store.layout(for: index).collapse(p.y)
+        let p = view.convert(top, to: page)
         return (index, p)
-    }
-
-    /// Selection's top-left stays put while its slot opens above it.
-    private func anchor(for model: Annotation) -> (page: Int, point: CGPoint) {
-        (model.page, CGPoint(x: model.rect.minX, y: model.rect.maxY))
     }
 
     // MARK: persistence
@@ -528,7 +460,7 @@ final class PDFViewModel: ObservableObject {
             settingsRequest += 1
             return false
         }
-        guard originalDocument?.page(at: pageIndex) != nil else { return true }
+        guard document?.page(at: pageIndex) != nil else { return true }
         let model = Annotation(
             id: UUID(),
             page: pageIndex,
@@ -543,7 +475,7 @@ final class PDFViewModel: ObservableObject {
         return true
     }
 
-    /// Captures the selection from the untouched page and sends it to the model.
+    /// Captures the selection from the page and sends it to the model.
     /// Used for first translation and for retrying.
     func translate(_ annotation: TranslationAnnotation) {
         let model = annotation.model
@@ -552,15 +484,14 @@ final class PDFViewModel: ObservableObject {
             settingsRequest += 1
             return
         }
-        guard let view = pdfView, let source = originalDocument?.page(at: model.page),
+        guard let view = pdfView, let source = document?.page(at: model.page),
               let png = SelectionOverlay.capture(page: source, rect: model.rect, scale: 3, box: view.displayBox) else {
             annotation.status = .failed("无法截取选区")
-            relayout(page: model.page, anchor: anchor(for: model))
+            SelectionOverlay.requestInvalidate()
             return
         }
         annotation.status = .loading
-        annotation.showsOriginal = false
-        relayout(page: model.page, anchor: anchor(for: model))
+        SelectionOverlay.requestInvalidate()
         activeTranslations += 1
         Log.write("translate page=\(model.page) rect=\(Int(model.rect.width))x\(Int(model.rect.height))pt png=\(png.count / 1024)KB")
         let settings = AppSettings.shared
@@ -575,12 +506,12 @@ final class PDFViewModel: ObservableObject {
                 await render(annotation, markdown: text)
                 guard store.view(for: model.id) === annotation else { return }
                 annotation.status = .done
-                relayout(page: model.page, anchor: anchor(for: model))
+                SelectionOverlay.requestInvalidate()
             } catch {
                 guard store.view(for: model.id) === annotation else { return }
                 let message = LLMClient.describe(error)
                 annotation.status = .failed(message)
-                relayout(page: model.page, anchor: anchor(for: model))
+                SelectionOverlay.requestInvalidate()
                 if let error = error as? LLMClient.LLMError, error.needsSettingsReview {
                     show("请检查翻译服务设置，修改后点击失败的译文框重试", isError: true,
                          actionTitle: "打开设置") { [weak self] in
@@ -592,11 +523,49 @@ final class PDFViewModel: ObservableObject {
         }
     }
 
-    /// Typesets Markdown/LaTeX at the selection's width; the slot follows the result's height.
+    var currentMaxInnerWidth: CGFloat {
+        if let workspace = pdfView?.superview as? ReaderWorkspaceView, workspace.bounds.width > 0 {
+            let sRect = workspace.overlay.sidebarRect
+            let cardWidth = max(sRect.width - CardSidebarLayout.cardHorizontalInset * 2, 100)
+            return max(cardWidth - 2 * TranslationAnnotation.cardInsetX, TranslationAnnotation.minInnerWidth)
+        }
+        return TranslationAnnotation.defaultRenderWidth
+    }
+
+    func sidebarWidthDidChange() {
+        let newMaxInner = currentMaxInnerWidth
+        guard abs(newMaxInner - lastRenderedMaxInnerWidth) >= 6 else { return }
+        sidebarRenderTask?.cancel()
+        sidebarRenderTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 180_000_000)
+            guard !Task.isCancelled, let self else { return }
+            let targetInner = self.currentMaxInnerWidth
+            guard abs(targetInner - self.lastRenderedMaxInnerWidth) >= 6 else { return }
+            self.lastRenderedMaxInnerWidth = targetInner
+            let candidates = self.store.allViews.filter {
+                $0.status == .done && TranslationAnnotation.isFullWidthContent($0.model.translationMd)
+            }
+            guard !candidates.isEmpty else { return }
+            for annotation in candidates {
+                guard !Task.isCancelled else { return }
+                await self.render(annotation, markdown: annotation.model.translationMd)
+            }
+            SelectionOverlay.requestInvalidate()
+        }
+    }
+
+    /// Typesets Markdown/LaTeX at an adaptive content width so compact cards shrink-to-fit
+    /// while full-width paragraphs expand to match the current sidebar width.
     func render(_ annotation: TranslationAnnotation, markdown: String) async {
-        let pageWidth = originalDocument?.page(at: annotation.model.page)?.bounds(for: pdfView?.displayBox ?? .cropBox).width ?? 600
-        let width = min(max(annotation.model.rect.width, 140), max(pageWidth - 4, 40))
-        let doc = try? await MarkdownRenderer.shared.render(markdown: markdown, width: width, fontSize: 10)
+        let maxInner = currentMaxInnerWidth
+        lastRenderedMaxInnerWidth = maxInner
+        let width = TranslationAnnotation.preferredRenderWidth(for: markdown, maxInnerWidth: maxInner)
+        let doc = try? await MarkdownRenderer.shared.render(
+            markdown: markdown,
+            width: width,
+            fontSize: TranslationAnnotation.renderFontSize,
+            fitToContent: true
+        )
         guard store.view(for: annotation.model.id) === annotation,
               annotation.model.translationMd == markdown else { return }
         if let doc {
@@ -610,28 +579,11 @@ final class PDFViewModel: ObservableObject {
 
     // MARK: annotation actions
 
-    /// Single click: failed boxes retry, others switch between translation and original.
+    /// Single click retries failed translations; completed translations remain visible in the sidebar.
     func click(_ annotation: TranslationAnnotation) {
-        switch annotation.status {
-        case .failed: translate(annotation)
-        case .loading: break
-        case .done: toggleOriginal(annotation)
+        if case .failed = annotation.status {
+            translate(annotation)
         }
-    }
-
-    func toggleOriginal(_ annotation: TranslationAnnotation) {
-        annotation.showsOriginal.toggle()
-        relayout(page: annotation.model.page, anchor: anchor(for: annotation.model))
-    }
-
-    func toggleAllTranslations() {
-        let views = store.allViews
-        guard !views.isEmpty else { return }
-        let collapse = views.contains { !$0.showsOriginal }
-        let pin = viewportTopAnchor()
-        for view in views { view.showsOriginal = collapse }
-        for page in Set(views.map(\.model.page)).sorted() { relayout(page: page, anchor: pin) }
-        show(collapse ? "已收起全部译文" : "已展开全部译文")
     }
 
     func copyTranslation(_ annotation: TranslationAnnotation) {
@@ -648,7 +600,8 @@ final class PDFViewModel: ObservableObject {
             id: annotation.model.id,
             draft: annotation.model.translationMd,
             pageIndex: annotation.model.page,
-            previewWidth: max(annotation.bounds.width, 220)
+            previewWidth: max(annotation.bounds.width - 2 * TranslationAnnotation.cardInsetX,
+                              TranslationAnnotation.defaultRenderWidth)
         )
     }
 
@@ -660,14 +613,13 @@ final class PDFViewModel: ObservableObject {
         store.update(annotation.model)
         scheduleSave()
         annotation.status = .done
-        annotation.showsOriginal = false
         annotation.rendered = nil
         annotation.fallbackText = MarkdownText.plainText(session.draft)
-        relayout(page: annotation.model.page, anchor: anchor(for: annotation.model))
+        SelectionOverlay.requestInvalidate()
         Task {
             await render(annotation, markdown: session.draft)
             guard store.view(for: session.id) === annotation else { return }
-            relayout(page: annotation.model.page, anchor: anchor(for: annotation.model))
+            SelectionOverlay.requestInvalidate()
         }
     }
 
@@ -680,7 +632,7 @@ final class PDFViewModel: ObservableObject {
         guard let index = store.remove(id: id) else { return }
         if editing?.id == id { editing = nil }
         scheduleSave()
-        relayout(page: annotation.model.page, anchor: anchor(for: annotation.model))
+        SelectionOverlay.requestInvalidate()
         undoManager?.registerUndo(withTarget: self) { target in
             MainActor.assumeIsolated { target.reinsert(annotation, at: index) }
         }
@@ -694,7 +646,7 @@ final class PDFViewModel: ObservableObject {
         guard store.view(for: annotation.model.id) == nil else { return }
         store.insert(annotation.model, view: annotation, at: index)
         scheduleSave()
-        relayout(page: annotation.model.page, anchor: anchor(for: annotation.model))
+        SelectionOverlay.requestInvalidate()
         undoManager?.registerUndo(withTarget: self) { target in
             MainActor.assumeIsolated { target.delete(annotation) }
         }

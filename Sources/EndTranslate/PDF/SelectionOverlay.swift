@@ -1,11 +1,11 @@
 import AppKit
 import PDFKit
 
-/// Viewport-fixed layer above the PDFView. It paints the translation boxes itself
-/// (vector, at device resolution) instead of relying on PDFAnnotation drawing, and
-/// owns box-selection with a page-space anchor plus edge auto-scroll.
+/// Spans the reader workspace (PDF panel on the left + floating card sidebar on the right).
+/// Paints source highlight boxes on the PDF, floating translation cards in the right sidebar,
+/// and smooth cubic Bézier leader lines connecting each boxed source paragraph to its card.
 final class SelectionOverlay: NSView {
-    /// Page index + selection rect in ORIGINAL page coordinates (gaps removed).
+    /// Page index + selection rect in PDF page coordinates.
     /// Returns false to keep the selection pending (e.g. translation not configured yet).
     var onSelection: ((Int, CGRect) -> Bool)?
     var onClickAnnotation: ((TranslationAnnotation) -> Void)?
@@ -13,10 +13,10 @@ final class SelectionOverlay: NSView {
     var onDeleteAnnotation: ((TranslationAnnotation) -> Void)?
     var onRetranslateAnnotation: ((TranslationAnnotation) -> Void)?
     var onCopyAnnotation: ((TranslationAnnotation) -> Void)?
-    var onToggleOriginal: ((TranslationAnnotation) -> Void)?
     var onOpenFile: ((URL) -> Void)?
     /// Scroll / zoom / resize: lets the model remember the reading position.
     var onViewportChange: (() -> Void)?
+    var onSidebarWidthChange: (() -> Void)?
     weak var store: AnnotationStore?
 
     private weak var pdfView: PDFView?
@@ -27,6 +27,9 @@ final class SelectionOverlay: NSView {
     private var lastToken = ""
     private var observers: [NSObjectProtocol] = []
 
+    var sidebarWidth: CGFloat = CardSidebarLayout.defaultSidebarWidth
+    private var isResizingSidebar = false
+
     // A finished selection waits here until the user confirms it on the chip,
     // so a stray trackpad drag never fires a translation by itself.
     private var pendingPage: Int?
@@ -36,14 +39,11 @@ final class SelectionOverlay: NSView {
     private weak var hovered: TranslationAnnotation?
     private var hoveredChipButton: Int?
     private var dropHighlight = false
-    /// Last single-click toggle, so the second click of a double-click can undo it.
-    private var lastToggle: (annotation: TranslationAnnotation?, time: TimeInterval)?
 
     private static var invalidateHandler: (() -> Void)?
     static func requestInvalidate() { invalidateHandler?() }
 
-    // Selection state (page-space anchor so momentum scroll can't desync it). Pages are tracked
-    // by index and points in original coordinates: gapped pages get replaced mid-drag.
+    // Selection state (page-space anchor so momentum scroll can't desync it).
     private var anchorPage: Int?
     private var anchorPagePoint: NSPoint = .zero
     private var currentOverlayPoint: NSPoint?
@@ -87,13 +87,58 @@ final class SelectionOverlay: NSView {
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
-    /// Lets clicks on the scroll bars through to the scroll view underneath.
+    // MARK: panel geometry
+
+    private var pdfScrollView: NSScrollView? {
+        pdfView?.documentView?.enclosingScrollView
+    }
+
+    private static let passthroughEventTypes: Set<NSEvent.EventType> = [
+        .scrollWheel, .magnify, .smartMagnify, .swipe, .rotate,
+        .gesture, .beginGesture, .endGesture, .directTouch
+    ]
+
+    func effectiveSidebarWidth(for totalWidth: CGFloat) -> CGFloat {
+        guard totalWidth > 260 else { return max(min(sidebarWidth, totalWidth * 0.4), 0) }
+        let maxAllowed = min(
+            CardSidebarLayout.maxSidebarWidth,
+            max(min(totalWidth * 0.48, totalWidth - 220), CardSidebarLayout.minSidebarWidth)
+        )
+        return min(max(sidebarWidth, CardSidebarLayout.minSidebarWidth), maxAllowed)
+    }
+
+    var sidebarRect: CGRect {
+        let w = effectiveSidebarWidth(for: bounds.width)
+        let x = max(bounds.width - w, 0)
+        return CGRect(x: x, y: 0, width: bounds.width - x, height: bounds.height)
+    }
+
+    var pdfPanelRect: CGRect {
+        CGRect(x: 0, y: 0, width: sidebarRect.minX, height: bounds.height)
+    }
+
+    private func isNearDivider(_ point: NSPoint) -> Bool {
+        abs(point.x - sidebarRect.minX) <= 4
+    }
+
+    /// Routes trackpad scroll/zoom gestures anywhere in the workspace (and clicks on
+    /// scroll bars) directly to PDFKit's internal scroll view so the PDF and sidebar cards
+    /// scroll and zoom together natively.
     override func hitTest(_ point: NSPoint) -> NSView? {
-        if let scrollView = pdfView?.documentView?.enclosingScrollView {
+        let localPoint = convert(point, from: superview)
+        guard bounds.contains(localPoint) else { return nil }
+        if !isDraggingSelection,
+           let event = NSApp.currentEvent,
+           Self.passthroughEventTypes.contains(event.type),
+           let target = pdfView?.documentView ?? pdfScrollView {
+            return target
+        }
+        if localPoint.x < sidebarRect.minX - 4,
+           let scrollView = pdfScrollView {
             for scroller in [scrollView.verticalScroller, scrollView.horizontalScroller].compactMap({ $0 })
             where !scroller.isHidden {
                 let local = scroller.convert(point, from: superview)
-                if scroller.bounds.contains(local) { return nil }
+                if scroller.bounds.contains(local) { return scroller }
             }
         }
         return super.hitTest(point)
@@ -113,7 +158,7 @@ final class SelectionOverlay: NSView {
     }
 
     private var loadingAnnotations: [TranslationAnnotation] {
-        store?.allViews.filter { $0.isLoading && !$0.showsOriginal } ?? []
+        store?.allViews.filter(\.isLoading) ?? []
     }
 
     private var hasLoadingAnnotation: Bool { !loadingAnnotations.isEmpty }
@@ -145,19 +190,19 @@ final class SelectionOverlay: NSView {
         if changed {
             needsDisplay = true
         } else {
-            // Only the skeletons animate: repaint just their boxes, not every rendered page.
-            for annotation in loadingAnnotations {
-                if let rect = overlayRect(of: annotation) { setNeedsDisplay(rect.insetBy(dx: -2, dy: -2)) }
+            // Only the skeletons animate: repaint just their card boxes in the sidebar.
+            for annotation in loadingAnnotations where !annotation.bounds.isEmpty {
+                setNeedsDisplay(annotation.bounds.insetBy(dx: -4, dy: -4))
             }
         }
         updateAnimationTimer()
     }
 
     private func transformToken() -> String {
-        let clip = pdfView?.documentView?.enclosingScrollView?.contentView
+        let clip = pdfScrollView?.contentView
         let o = clip?.bounds.origin ?? .zero
         let s = pdfView?.scaleFactor ?? 1
-        return "\(o.x)|\(o.y)|\(s)|\(bounds.width)|\(bounds.height)"
+        return "\(o.x)|\(o.y)|\(s)|\(bounds.width)|\(bounds.height)|\(sidebarWidth)"
     }
 
     // MARK: cursor & hover
@@ -173,24 +218,23 @@ final class SelectionOverlay: NSView {
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        updateHover(at: convert(event.locationInWindow, from: nil), modifiers: event.modifierFlags)
+        updateHover(at: convert(event.locationInWindow, from: nil))
     }
 
     override func mouseMoved(with event: NSEvent) {
-        updateHover(at: convert(event.locationInWindow, from: nil), modifiers: event.modifierFlags)
+        updateHover(at: convert(event.locationInWindow, from: nil))
     }
 
     override func mouseExited(with event: NSEvent) {
         setHovered(nil, chipButton: nil)
     }
 
-    override func flagsChanged(with event: NSEvent) {
-        super.flagsChanged(with: event)
-        guard let window else { return }
-        updateHover(at: convert(window.mouseLocationOutsideOfEventStream, from: nil), modifiers: event.modifierFlags)
-    }
-
-    private func updateHover(at p: NSPoint, modifiers: NSEvent.ModifierFlags) {
+    private func updateHover(at p: NSPoint) {
+        if isResizingSidebar || isNearDivider(p) {
+            setHovered(nil, chipButton: nil)
+            NSCursor.resizeLeftRight.set()
+            return
+        }
         if let adjustment {
             setHovered(nil, chipButton: nil)
             cursor(for: adjustment.kind, dragging: true).set()
@@ -202,15 +246,16 @@ final class SelectionOverlay: NSView {
             NSCursor.pointingHand.set()
             return
         }
-        if !modifiers.contains(.option), let kind = pendingInteraction(at: p) {
+        if p.x < sidebarRect.minX, let kind = pendingInteraction(at: p) {
             setHovered(nil, chipButton: nil)
             cursor(for: kind).set()
             return
         }
-        // Option forces a new selection even on top of an existing box.
-        let hit = modifiers.contains(.option) ? nil : annotation(at: p)
+        let hit = annotation(at: p)
         setHovered(hit, chipButton: nil)
-        if hit != nil {
+        if p.x >= sidebarRect.minX {
+            (hit != nil ? NSCursor.pointingHand : NSCursor.arrow).set()
+        } else if hit?.isFailed == true {
             NSCursor.pointingHand.set()
         } else if isOverPage(p) {
             NSCursor.crosshair.set()
@@ -227,55 +272,109 @@ final class SelectionOverlay: NSView {
     }
 
     private func isOverPage(_ p: NSPoint) -> Bool {
-        guard let pdfView else { return false }
+        guard p.x < sidebarRect.minX, let pdfView else { return false }
         return pdfView.page(for: convert(p, to: pdfView), nearest: false) != nil
     }
 
-    // MARK: coordinates
+    // MARK: coordinates & card layout
 
     private func displayedPage(_ index: Int) -> PDFPage? {
         pdfView?.document?.page(at: index)
     }
 
-    private func layout(_ index: Int) -> GapLayout {
-        store?.layout(for: index) ?? .empty
-    }
-
-    /// Overlay point → original page coordinates of the given page.
+    /// Overlay point → page coordinates of the given page.
     private func originalPoint(_ overlayPoint: NSPoint, page index: Int) -> NSPoint? {
         guard let pdfView, let page = displayedPage(index) else { return nil }
-        var p = pdfView.convert(convert(overlayPoint, to: pdfView), to: page)
-        p.y = layout(index).collapse(p.y)
-        return p
+        return pdfView.convert(convert(overlayPoint, to: pdfView), to: page)
     }
 
     private func overlayPoint(original point: CGPoint, page index: Int) -> CGPoint? {
         guard let pdfView, let page = displayedPage(index) else { return nil }
-        let expanded = CGPoint(x: point.x, y: layout(index).expand(point.y))
-        return convert(pdfView.convert(expanded, from: page), from: pdfView)
+        return convert(pdfView.convert(point, from: page), from: pdfView)
     }
 
-    /// Original-coordinate rect → overlay rect (a rect spanning a gap stretches over it).
+    /// Page-coordinate rect → overlay rect.
     private func overlayRect(original rect: CGRect, page index: Int) -> CGRect? {
         guard let pdfView, let page = displayedPage(index) else { return nil }
-        let l = layout(index)
-        let minY = l.expand(rect.minY)
-        let maxY = rect.height > 0 ? l.expand(rect.maxY) : minY
-        let expanded = CGRect(x: rect.minX, y: minY, width: rect.width, height: maxY - minY)
-        return convert(pdfView.convert(expanded, from: page), from: pdfView)
+        return convert(pdfView.convert(rect, from: page), from: pdfView)
     }
 
     private func originalBounds(page index: Int) -> CGRect? {
         guard let pdfView, let page = displayedPage(index) else { return nil }
-        var b = page.bounds(for: pdfView.displayBox)
-        b.size.height -= layout(index).totalHeight
-        return b
+        return page.bounds(for: pdfView.displayBox)
     }
 
-    /// A translation box (expanded page coordinates) → overlay rect.
-    private func overlayRect(of annotation: TranslationAnnotation) -> CGRect? {
-        guard let pdfView, let page = displayedPage(annotation.model.page) else { return nil }
-        return convert(pdfView.convert(annotation.bounds, from: page), from: pdfView)
+    /// Computes and assigns non-overlapping sidebar card frames for annotations whose source
+    /// selection is currently visible in the PDF viewport (SPEC §3.1.2).
+    ///
+    /// Annotations that scrolled out of view get `bounds = .zero` so they neither paint nor
+    /// respond to sidebar mouse hits, and the remaining cards re-justify into the freed space.
+    @discardableResult
+    func layoutSidebarCards() -> [PlacedSidebarCard] {
+        guard let pdfView, let doc = pdfView.document, let store else { return [] }
+        let sRect = sidebarRect
+        let cardX = sRect.minX + CardSidebarLayout.cardHorizontalInset
+        let cardWidth = max(sRect.width - CardSidebarLayout.cardHorizontalInset * 2, 100)
+        let panel = pdfPanelRect
+
+        var specs: [SidebarCardSpec] = []
+        specs.reserveCapacity(store.annotations.count)
+        for model in store.annotations {
+            guard let view = store.view(for: model.id),
+                  let page = doc.page(at: model.page) else { continue }
+            let sourceRect = convert(pdfView.convert(model.rect, from: page), from: pdfView)
+            guard Self.isSourceVisibleInViewport(sourceRect, in: panel) else {
+                view.bounds = .zero
+                continue
+            }
+            let metrics = view.layoutMetrics(maxCardWidth: cardWidth)
+            specs.append(SidebarCardSpec(
+                id: model.id,
+                page: model.page,
+                sourceRect: model.rect,
+                desiredY: sourceRect.minY,
+                preferredWidth: metrics.naturalWidth,
+                height: metrics.naturalHeight,
+                pageMinY: 0,
+                pageMaxY: sRect.height,
+                viewportRect: sourceRect,
+                isFullWidth: metrics.isFullWidth,
+                contentUnits: metrics.contentUnits
+            ))
+        }
+
+        let placed = CardSidebarLayout.placeScreenCards(
+            specs,
+            cardX: cardX,
+            cardWidth: cardWidth,
+            viewportHeight: sRect.height
+        )
+        let placedIDs = Set(placed.map(\.id))
+        for model in store.annotations where !placedIDs.contains(model.id) {
+            store.view(for: model.id)?.bounds = .zero
+        }
+        for item in placed {
+            store.view(for: item.id)?.bounds = item.frame
+        }
+        return placed
+    }
+
+    /// SPEC §3.1.2: a source box activates its translation when it is horizontally inside the
+    /// PDF panel and either 25% of its height is exposed, its center is on screen, or a very
+    /// tall selection shows at least 20% of the viewport.
+    static func isSourceVisibleInViewport(_ sourceRect: CGRect, in panel: CGRect) -> Bool {
+        guard !panel.isEmpty,
+              sourceRect.width.isFinite, sourceRect.height.isFinite,
+              sourceRect.minX.isFinite, sourceRect.minY.isFinite,
+              !sourceRect.isNull, !sourceRect.isEmpty else { return false }
+        guard sourceRect.maxX > panel.minX + 2,
+              sourceRect.minX < panel.maxX - 2 else { return false }
+        let top = max(sourceRect.minY, panel.minY)
+        let bottom = min(sourceRect.maxY, panel.maxY)
+        let visibleHeight = max(0, bottom - top)
+        if visibleHeight / max(sourceRect.height, 1) >= 0.25 { return true }
+        if sourceRect.midY >= panel.minY, sourceRect.midY <= panel.maxY { return true }
+        return visibleHeight >= 0.20 * panel.height
     }
 
     // MARK: hit testing
@@ -288,7 +387,8 @@ final class SelectionOverlay: NSView {
     }
 
     private func pendingInteraction(at point: CGPoint) -> SelectionAdjustment.Kind? {
-        guard let pendingPage, let rect = overlayRect(original: pendingRect, page: pendingPage) else { return nil }
+        guard point.x < sidebarRect.minX,
+              let pendingPage, let rect = overlayRect(original: pendingRect, page: pendingPage) else { return nil }
         let points = pendingHandlePoints()
         func distance(to other: CGPoint) -> CGFloat { hypot(point.x - other.x, point.y - other.y) }
         if let closest = points.min(by: { distance(to: $0.1) < distance(to: $1.1) }),
@@ -323,24 +423,86 @@ final class SelectionOverlay: NSView {
     }
 
     private func annotation(at overlayPoint: NSPoint) -> TranslationAnnotation? {
-        guard let pdfView, let doc = pdfView.document, let store else { return nil }
+        guard let store else { return nil }
+        layoutSidebarCards()
+        if overlayPoint.x >= sidebarRect.minX {
+            // Hit-test floating cards in the right sidebar.
+            for model in store.annotations.reversed() {
+                guard let v = store.view(for: model.id), !v.bounds.isEmpty else { continue }
+                if v.bounds.contains(overlayPoint) { return v }
+            }
+            return nil
+        }
+        // Hit-test source highlight boxes on the PDF page.
+        guard let pdfView, let doc = pdfView.document else { return nil }
         let viewPoint = convert(overlayPoint, to: pdfView)
         guard let page = pdfView.page(for: viewPoint, nearest: false) else { return nil }
         let pagePoint = pdfView.convert(viewPoint, to: page)
         let index = doc.index(for: page)
         for model in store.annotations.reversed() where model.page == index {
             guard let v = store.view(for: model.id) else { continue }
-            // Collapsed handles are thin; give them a comfortable hit target.
-            let target = v.showsOriginal ? v.bounds.insetBy(dx: 0, dy: -4) : v.bounds
-            if target.contains(pagePoint) { return v }
+            if model.rect.insetBy(dx: -2, dy: -2).contains(pagePoint) { return v }
         }
         return nil
     }
 
-    // MARK: mouse
+    // MARK: mouse & scrolling
+
+    override func scrollWheel(with event: NSEvent) {
+        if let scrollView = pdfScrollView {
+            scrollView.scrollWheel(with: event)
+        } else {
+            super.scrollWheel(with: event)
+        }
+        if isDraggingSelection {
+            recomputeSelection()
+        }
+        needsDisplay = true
+    }
+
+    override func magnify(with event: NSEvent) {
+        if let scrollView = pdfScrollView {
+            scrollView.magnify(with: event)
+        } else {
+            super.magnify(with: event)
+        }
+        needsDisplay = true
+    }
+
+    override func smartMagnify(with event: NSEvent) {
+        if let scrollView = pdfScrollView {
+            scrollView.smartMagnify(with: event)
+        } else {
+            super.smartMagnify(with: event)
+        }
+        needsDisplay = true
+    }
+
+    override func swipe(with event: NSEvent) {
+        if let scrollView = pdfScrollView {
+            scrollView.swipe(with: event)
+        } else {
+            super.swipe(with: event)
+        }
+        needsDisplay = true
+    }
+
+    override func rotate(with event: NSEvent) {
+        if let scrollView = pdfScrollView {
+            scrollView.rotate(with: event)
+        } else {
+            super.rotate(with: event)
+        }
+        needsDisplay = true
+    }
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+        if isNearDivider(p) {
+            isResizingSidebar = true
+            NSCursor.resizeLeftRight.set()
+            return
+        }
         if let chip = chipRects() {
             if chip.confirm.contains(p) {
                 confirmPending()
@@ -352,45 +514,43 @@ final class SelectionOverlay: NSView {
             }
             if chip.frame.contains(p) { return }
         }
-        if !event.modifierFlags.contains(.option), let page = pendingPage,
+        if p.x < sidebarRect.minX, let page = pendingPage,
            let kind = pendingInteraction(at: p), let origin = originalPoint(p, page: page) {
             window?.makeFirstResponder(self)
             adjustment = SelectionAdjustment(kind: kind, startPoint: origin, startRect: pendingRect)
             currentOverlayPoint = p
-            lastToggle = nil
             cursor(for: kind, dragging: true).set()
             needsDisplay = true
             updateAnimationTimer()
             return
         }
         if pendingPage != nil { cancelPending() }
-        if event.clickCount >= 2, !event.modifierFlags.contains(.option), let last = lastToggle,
-           event.timestamp - last.time <= NSEvent.doubleClickInterval, let annotation = last.annotation {
-            // The first click of this double-click already toggled the box (possibly out from
-            // under the cursor). Put it back and treat the pair as "edit".
-            lastToggle = nil
-            onToggleOriginal?(annotation)
-            onEditAnnotation?(annotation)
-            return
-        }
-        if !event.modifierFlags.contains(.option), let hit = annotation(at: p) {
-            // Clicks land on us, not the PDFView; hand it the keyboard so arrows/space scroll.
+
+        // Clicking inside the right sidebar interacts with translation cards directly.
+        if p.x >= sidebarRect.minX {
             if let pdfView { window?.makeFirstResponder(pdfView) }
-            if event.clickCount >= 2 {
-                lastToggle = nil
-                onEditAnnotation?(hit)
-            } else {
-                if hit.status == .done {
-                    lastToggle = (annotation: hit, time: event.timestamp)
+            if let hit = annotation(at: p) {
+                if event.clickCount >= 2 {
+                    onEditAnnotation?(hit)
                 } else {
-                    lastToggle = nil
+                    onClickAnnotation?(hit)
                 }
-                onClickAnnotation?(hit)
             }
             return
         }
-        lastToggle = nil
-        guard let pdfView, let doc = pdfView.document else { return }
+
+        // Double-clicking a source highlight on the PDF page opens the translation editor.
+        if event.clickCount >= 2, let hit = annotation(at: p) {
+            if let pdfView { window?.makeFirstResponder(pdfView) }
+            onEditAnnotation?(hit)
+            return
+        }
+
+        // Box selection starts anywhere inside the left PDF panel (even over an existing highlight).
+        guard let pdfView, let doc = pdfView.document else {
+            if let pdfView { window?.makeFirstResponder(pdfView) }
+            return
+        }
         guard let page = pdfView.page(for: convert(p, to: pdfView), nearest: false) else {
             window?.makeFirstResponder(pdfView)
             return
@@ -407,16 +567,31 @@ final class SelectionOverlay: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        if isResizingSidebar {
+            let proposed = bounds.width - p.x
+            sidebarWidth = min(max(proposed, CardSidebarLayout.minSidebarWidth),
+                               min(CardSidebarLayout.maxSidebarWidth, max(bounds.width * 0.48, CardSidebarLayout.minSidebarWidth)))
+            onSidebarWidthChange?()
+            needsDisplay = true
+            return
+        }
         guard isDraggingSelection else { return }
-        currentOverlayPoint = convert(event.locationInWindow, from: nil)
+        currentOverlayPoint = CGPoint(x: min(p.x, sidebarRect.minX - 1), y: p.y)
         recomputeSelection()
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
+        if isResizingSidebar {
+            isResizingSidebar = false
+            needsDisplay = true
+            return
+        }
         defer { endDrag() }
         guard isDraggingSelection else { return }
-        currentOverlayPoint = convert(event.locationInWindow, from: nil)
+        let p = convert(event.locationInWindow, from: nil)
+        currentOverlayPoint = CGPoint(x: min(p.x, sidebarRect.minX - 1), y: p.y)
         recomputeSelection()
         if adjustment != nil { return }
         guard let page = anchorPage else { return }
@@ -424,6 +599,9 @@ final class SelectionOverlay: NSView {
         guard !rect.isNull, rect.width >= SelectionAdjustment.minimumSize,
               rect.height >= SelectionAdjustment.minimumSize else {
             if let pdfView { window?.makeFirstResponder(pdfView) }
+            if let hit = annotation(at: p), hit.isFailed {
+                onClickAnnotation?(hit)
+            }
             return
         }
         pendingPage = page
@@ -457,8 +635,6 @@ final class SelectionOverlay: NSView {
         add("拷贝译文", #selector(menuCopy(_:)), enabled: hasText)
         add("重新翻译", #selector(menuRetranslate(_:)), enabled: !hit.isLoading)
         menu.addItem(.separator())
-        add(hit.showsOriginal ? "展开译文" : "收起译文", #selector(menuToggleOriginal(_:)), enabled: !hit.isLoading)
-        menu.addItem(.separator())
         add("删除译文框", #selector(menuDelete(_:)))
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
@@ -476,11 +652,6 @@ final class SelectionOverlay: NSView {
     @objc private func menuRetranslate(_ sender: NSMenuItem) {
         guard let annotation = menuAnnotation else { return }
         onRetranslateAnnotation?(annotation)
-    }
-
-    @objc private func menuToggleOriginal(_ sender: NSMenuItem) {
-        guard let annotation = menuAnnotation else { return }
-        onToggleOriginal?(annotation)
     }
 
     @objc private func menuDelete(_ sender: NSMenuItem) {
@@ -587,14 +758,15 @@ final class SelectionOverlay: NSView {
     private func chipRects() -> ChipRects? {
         guard adjustment == nil, let pendingPage, !pendingRect.isNull,
               let sel = overlayRect(original: pendingRect, page: pendingPage),
-              sel.intersects(bounds) else { return nil }
+              sel.intersects(pdfPanelRect) else { return nil }
         let confirmW: CGFloat = 66
         let cancelW: CGFloat = 50
         let buttonH: CGFloat = 24
         let pad: CGFloat = 4
         let gap: CGFloat = 4
         let size = CGSize(width: pad * 2 + confirmW + cancelW + gap, height: pad * 2 + buttonH)
-        let x = min(max(sel.maxX - size.width, 4), max(bounds.width - size.width - 4, 4))
+        let maxX = max(pdfPanelRect.maxX - size.width - 6, 4)
+        let x = min(max(sel.maxX - size.width, 4), maxX)
         var y = sel.maxY + 6
         if y + size.height > bounds.height - 4 { y = sel.minY - 6 - size.height }
         if y < 4 { y = min(max(bounds.height - size.height - 4, 4), sel.maxY + 6) }
@@ -645,10 +817,231 @@ final class SelectionOverlay: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        drawAnnotations(in: ctx, dirtyRect: dirtyRect)
+        layoutSidebarCards()
+        drawSidebarBackdrop(in: ctx, dirtyRect: dirtyRect)
+        drawSourceHighlightsAndSelection(in: ctx, dirtyRect: dirtyRect)
+        drawConnectors(in: ctx, onlyHovered: false)
+        drawSidebarCards(in: ctx, dirtyRect: dirtyRect)
+        drawConnectors(in: ctx, onlyHovered: true)
+        if dropHighlight { drawDropHighlight() }
+    }
+
+    private func drawSourceHighlightsAndSelection(in ctx: CGContext, dirtyRect: CGRect) {
+        let pdfArea = pdfPanelRect
+        guard pdfArea.intersects(dirtyRect) else { return }
+        ctx.saveGState()
+        ctx.clip(to: pdfArea)
+
+        if let pdfView, let doc = pdfView.document, let store {
+            for model in store.annotations {
+                guard let view = store.view(for: model.id),
+                      let page = doc.page(at: model.page) else { continue }
+                let sourceRect = convert(pdfView.convert(model.rect, from: page), from: pdfView)
+                guard sourceRect.intersects(pdfArea),
+                      sourceRect.insetBy(dx: -4, dy: -4).intersects(dirtyRect) else { continue }
+                let isHovered = view === hovered
+                let color: NSColor = view.isFailed ? .systemRed : Self.accent
+
+                ctx.saveGState()
+                let rounded = CGPath(roundedRect: sourceRect,
+                                     cornerWidth: min(3, sourceRect.width * 0.25),
+                                     cornerHeight: min(3, sourceRect.height * 0.25),
+                                     transform: nil)
+                ctx.setFillColor(color.withAlphaComponent(isHovered ? 0.12 : 0.055).cgColor)
+                ctx.addPath(rounded)
+                ctx.fillPath()
+                ctx.setStrokeColor(color.withAlphaComponent(isHovered ? 0.92 : 0.48).cgColor)
+                ctx.setLineWidth(isHovered ? 1.75 : 1.1)
+                ctx.addPath(rounded)
+                ctx.strokePath()
+                ctx.restoreGState()
+            }
+        }
+
         drawSelectionRubberBand()
         drawPendingConfirm()
-        if dropHighlight { drawDropHighlight() }
+        ctx.restoreGState()
+    }
+
+    private func drawSidebarBackdrop(in ctx: CGContext, dirtyRect: CGRect) {
+        let sRect = sidebarRect
+        guard sRect.intersects(dirtyRect) else { return }
+
+        ctx.saveGState()
+        ctx.clip(to: sRect)
+
+        // Panel backdrop and left divider.
+        ctx.setFillColor(NSColor.controlBackgroundColor.cgColor)
+        ctx.fill(sRect)
+        ctx.setFillColor(NSColor.separatorColor.cgColor)
+        ctx.fill(CGRect(x: sRect.minX, y: 0, width: 1, height: sRect.height))
+
+        if let store, pdfView?.document != nil, store.annotations.isEmpty {
+            drawEmptySidebarHint(in: sRect)
+        }
+
+        ctx.restoreGState()
+    }
+
+    private func drawSidebarCards(in ctx: CGContext, dirtyRect: CGRect) {
+        let sRect = sidebarRect
+        guard sRect.intersects(dirtyRect),
+              let store, pdfView?.document != nil, !store.annotations.isEmpty else { return }
+
+        ctx.saveGState()
+        ctx.clip(to: sRect)
+
+        let phase = Date().timeIntervalSinceReferenceDate
+        let ordered = store.annotations.compactMap { store.view(for: $0.id) }
+        let sortedForPaint = ordered.filter { $0 !== hovered } + ordered.filter { $0 === hovered }
+        for view in sortedForPaint {
+            let cardRect = view.bounds
+            guard !cardRect.isEmpty,
+                  cardRect.intersects(sRect),
+                  cardRect.insetBy(dx: -8, dy: -8).intersects(dirtyRect) else { continue }
+            drawCard(view, in: cardRect, isHovered: view === hovered, phase: phase, context: ctx)
+        }
+
+        ctx.restoreGState()
+    }
+
+    private func drawEmptySidebarHint(in sRect: CGRect) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineSpacing = 4
+        let text = "在左侧页面拖拽框选段落\n译文悬浮卡片将显示在此处并与原文连线"
+        let attr = NSAttributedString(string: text, attributes: [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: paragraph
+        ])
+        let size = attr.size()
+        let drawRect = CGRect(
+            x: sRect.midX - size.width / 2,
+            y: sRect.midY - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+        attr.draw(in: drawRect)
+    }
+
+    private func drawCard(_ view: TranslationAnnotation, in cardRect: CGRect, isHovered: Bool,
+                          phase: TimeInterval, context ctx: CGContext) {
+        ctx.saveGState()
+        let cornerRadius = min(SidebarCardStyle.cornerRadius,
+                               min(cardRect.width, cardRect.height) * 0.35)
+        let cardPath = CGPath(roundedRect: cardRect, cornerWidth: cornerRadius,
+                              cornerHeight: cornerRadius, transform: nil)
+
+        let rule: NSColor = view.isFailed ? .systemRed : Self.accent
+        let tint: NSColor
+        if view.isFailed {
+            tint = NSColor(calibratedRed: 1, green: 0.955, blue: 0.95, alpha: 1)
+        } else if isHovered {
+            tint = NSColor(calibratedRed: 0.93, green: 0.955, blue: 1, alpha: 1)
+        } else {
+            tint = NSColor(calibratedRed: 0.985, green: 0.99, blue: 1, alpha: 1)
+        }
+
+        // Soft floating card shadow.
+        ctx.saveGState()
+        ctx.setShadow(
+            offset: CGSize(width: 0, height: isHovered ? 3 : 2),
+            blur: isHovered ? 12 : 8,
+            color: NSColor.black.withAlphaComponent(isHovered ? 0.16 : 0.10).cgColor
+        )
+        ctx.setFillColor(tint.cgColor)
+        ctx.addPath(cardPath)
+        ctx.fillPath()
+        ctx.restoreGState()
+
+        ctx.saveGState()
+        ctx.addPath(cardPath)
+        ctx.clip()
+
+        let contentRect = TranslationAnnotation.contentRect(for: cardRect)
+        let maxInnerWidth = max(
+            sidebarRect.width - 2 * CardSidebarLayout.cardHorizontalInset - 2 * TranslationAnnotation.cardInsetX,
+            TranslationAnnotation.minInnerWidth
+        )
+        let textScale = min(max(maxInnerWidth / TranslationAnnotation.defaultRenderWidth, 0.5), 1.0)
+        switch view.status {
+        case .loading:
+            drawSkeleton(in: contentRect, phase: phase, context: ctx)
+        case .done:
+            if let rendered = view.rendered {
+                rendered.draw(in: contentRect, context: ctx, yDown: true)
+            } else {
+                TranslationAnnotation.drawText(view.displayText, color: .black,
+                    in: contentRect, context: ctx, yDown: true, scale: textScale)
+            }
+        case .failed:
+            TranslationAnnotation.drawText(view.displayText, color: .systemRed,
+                in: contentRect, context: ctx, yDown: true, scale: textScale)
+        }
+
+        // Inset accent capsule: lighter and more refined than a full-height stripe.
+        let accentBar = SidebarCardStyle.accentBar(in: cardRect)
+        let accentRadius = accentBar.width * 0.5
+        ctx.setFillColor(rule.withAlphaComponent(isHovered ? 0.95 : 0.6).cgColor)
+        ctx.addPath(CGPath(roundedRect: accentBar, cornerWidth: accentRadius,
+                           cornerHeight: accentRadius, transform: nil))
+        ctx.fillPath()
+        ctx.restoreGState()
+
+        // Card border.
+        ctx.setStrokeColor(rule.withAlphaComponent(isHovered ? 0.8 : 0.26).cgColor)
+        ctx.setLineWidth(isHovered ? 1.3 : 0.9)
+        ctx.addPath(cardPath)
+        ctx.strokePath()
+        ctx.restoreGState()
+    }
+
+    private func drawConnectors(in ctx: CGContext, onlyHovered: Bool) {
+        guard let pdfView, let doc = pdfView.document, let store, !store.annotations.isEmpty else { return }
+        if onlyHovered, hovered == nil { return }
+        let sRect = sidebarRect
+        let visibleVertical = bounds.insetBy(dx: 0, dy: -80)
+
+        let ordered = store.annotations.compactMap { store.view(for: $0.id) }
+        let viewsToPaint = ordered.filter { ($0 === hovered) == onlyHovered }
+        guard !viewsToPaint.isEmpty else { return }
+
+        ctx.saveGState()
+        for view in viewsToPaint {
+            guard !view.bounds.isEmpty,
+                  let page = doc.page(at: view.model.page) else { continue }
+            let sourceRect = convert(pdfView.convert(view.model.rect, from: page), from: pdfView)
+            let cardRect = view.bounds
+            guard sourceRect.maxY >= visibleVertical.minY, sourceRect.minY <= visibleVertical.maxY,
+                  cardRect.maxY >= visibleVertical.minY, cardRect.minY <= visibleVertical.maxY else { continue }
+
+            let isHovered = view === hovered
+            let color: NSColor = view.isFailed ? .systemRed : Self.accent
+            let alpha: CGFloat = isHovered ? 0.92 : 0.42
+            let connector = CardConnector(
+                sourceRect: sourceRect,
+                cardRect: cardRect,
+                minSourceX: 6,
+                maxSourceX: max(sRect.minX - 6, 6)
+            )
+
+            ctx.saveGState()
+            ctx.setStrokeColor(color.withAlphaComponent(alpha).cgColor)
+            ctx.setLineWidth(isHovered ? 1.8 : 1.15)
+            connector.addPath(to: ctx)
+            ctx.strokePath()
+
+            // Anchor endpoints on the source box and on the sidebar card.
+            let dotRadius: CGFloat = isHovered ? 3.2 : 2.2
+            ctx.setFillColor(color.withAlphaComponent(min(alpha + 0.15, 1.0)).cgColor)
+            ctx.fillEllipse(in: CGRect(x: connector.start.x - dotRadius, y: connector.start.y - dotRadius,
+                                       width: dotRadius * 2, height: dotRadius * 2))
+            ctx.fillEllipse(in: CGRect(x: connector.end.x - dotRadius, y: connector.end.y - dotRadius,
+                                       width: dotRadius * 2, height: dotRadius * 2))
+            ctx.restoreGState()
+        }
+        ctx.restoreGState()
     }
 
     private func drawPendingConfirm() {
@@ -722,79 +1115,11 @@ final class SelectionOverlay: NSView {
         path.stroke()
     }
 
-    private func drawAnnotations(in ctx: CGContext, dirtyRect: CGRect) {
-        guard let pdfView, let doc = pdfView.document, let store else { return }
-        let phase = Date().timeIntervalSinceReferenceDate
-        for model in store.annotations {
-            guard let view = store.view(for: model.id),
-                  let page = doc.page(at: model.page) else { continue }
-            let rect = convert(pdfView.convert(view.bounds, from: page), from: pdfView)
-            guard rect.intersects(bounds), rect.insetBy(dx: -3, dy: -3).intersects(dirtyRect) else { continue }
-            let isHovered = view === hovered
-
-            if view.showsOriginal {
-                // Collapsed slot: a thin handle marking where the translation lives.
-                ctx.saveGState()
-                ctx.setFillColor(Self.accent.withAlphaComponent(isHovered ? 0.7 : 0.35).cgColor)
-                let handle = CGRect(x: rect.minX, y: rect.midY - 1, width: min(rect.width, 36), height: 2)
-                ctx.fill(handle)
-                ctx.setStrokeColor(Self.accent.withAlphaComponent(isHovered ? 0.5 : 0.25).cgColor)
-                ctx.setLineWidth(0.5)
-                ctx.setLineDash(phase: 0, lengths: [3, 2])
-                ctx.move(to: CGPoint(x: handle.maxX + 2, y: rect.midY))
-                ctx.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
-                ctx.strokePath()
-                ctx.restoreGState()
-                continue
-            }
-
-            ctx.saveGState()
-            let tint: NSColor
-            let rule: NSColor
-            switch view.status {
-            case .failed:
-                tint = NSColor(calibratedRed: 1, green: 0.95, blue: 0.94, alpha: 1)
-                rule = .systemRed
-            default:
-                tint = isHovered
-                    ? NSColor(calibratedRed: 0.91, green: 0.94, blue: 1, alpha: 1)
-                    : NSColor(calibratedRed: 0.955, green: 0.965, blue: 1, alpha: 1)
-                rule = Self.accent
-            }
-            ctx.setFillColor(tint.cgColor)
-            ctx.fill(rect)
-
-            let textScale = rect.width / view.bounds.width
-            switch view.status {
-            case .loading:
-                drawSkeleton(in: rect, phase: phase, context: ctx)
-            case .done:
-                if let rendered = view.rendered {
-                    rendered.draw(in: rect, context: ctx, yDown: true)
-                } else {
-                    TranslationAnnotation.drawText(view.displayText, color: .black,
-                        in: rect.insetBy(dx: 3 * textScale, dy: 3 * textScale), context: ctx,
-                        yDown: true, scale: textScale)
-                }
-            case .failed:
-                TranslationAnnotation.drawText(view.displayText, color: .systemRed,
-                    in: rect.insetBy(dx: 5 * textScale, dy: 3 * textScale), context: ctx,
-                    yDown: true, scale: textScale)
-            }
-            // Left rule instead of a full frame: reads as an interlinear gloss, not a sticky note.
-            ctx.setFillColor(rule.withAlphaComponent(isHovered ? 0.9 : 0.55).cgColor)
-            ctx.fill(CGRect(x: rect.minX, y: rect.minY, width: isHovered ? 2.5 : 1.5, height: rect.height))
-            ctx.restoreGState()
-        }
-    }
-
     /// Placeholder lines with a soft sweep, sized like the text that's coming.
     private func drawSkeleton(in rect: CGRect, phase: TimeInterval, context ctx: CGContext) {
-        // rect is in view points; size the bars in page points so they track zoom.
-        let scale = pdfView?.scaleFactor ?? 1
-        let lineHeight = max(5 * scale, 3)
-        let spacing = max(6 * scale, 4)
-        let inset = CGPoint(x: 6 * scale, y: 5 * scale)
+        let lineHeight: CGFloat = 6
+        let spacing: CGFloat = 7
+        let inset = CGPoint(x: 4, y: 4)
         let widths: [CGFloat] = [0.94, 0.86, 0.9, 0.62]
         var y = rect.minY + inset.y
         var i = 0
@@ -809,7 +1134,6 @@ final class SelectionOverlay: NSView {
             // Each bar pulses slightly out of step, so the block reads as "flowing in".
             let wave = 0.5 + 0.5 * sin(phase * 3.2 - Double(i) * 0.6)
             ctx.setFillColor(Self.accent.withAlphaComponent(0.10 + 0.10 * wave).cgColor)
-            // CGPath asserts when a corner radius exceeds half the rect.
             let radius = min(lineHeight, bar.width) / 2
             ctx.addPath(CGPath(roundedRect: bar, cornerWidth: radius, cornerHeight: radius, transform: nil))
             ctx.fillPath()
@@ -859,3 +1183,4 @@ final class SelectionOverlay: NSView {
         return rep.representation(using: .png, properties: [:])
     }
 }
+

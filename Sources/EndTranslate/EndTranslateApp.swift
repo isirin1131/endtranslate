@@ -118,10 +118,6 @@ struct AppCommands: Commands {
                 .keyboardShortcut("9")
                 .disabled(model?.document == nil)
             Divider()
-            Button("收起/展开全部译文") { model?.toggleAllTranslations() }
-                .keyboardShortcut("t", modifiers: [.command, .shift])
-                .disabled(model?.document == nil)
-            Divider()
         }
         // No help book: drop the item that would only say "Help isn't available".
         CommandGroup(replacing: .help) {}

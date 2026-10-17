@@ -135,4 +135,20 @@ final class MarkdownRendererTests {
         }
         try? FileManager.default.removeItem(at: tempDir)
     }
+
+    @Test func fitToContentShrinksShortLabelsAndExpandsLongParagraphs() async throws {
+        let short = try await renderer.render(markdown: "范数", width: 195, fontSize: 10, fitToContent: true)
+        let medium = try await renderer.render(markdown: "Transformer 编码器", width: 195, fontSize: 10, fitToContent: true)
+        let long = try await renderer.render(
+            markdown: "图1：模型概览。我们将图像分割为固定大小的图像块，对每个图像块进行线性嵌入，添加位置嵌入，并将得到的向量序列输入标准 Transformer 编码器。",
+            width: 290,
+            fontSize: 10,
+            fitToContent: true
+        )
+        #expect(short.size.width >= 24)
+        #expect(short.size.width < 50)
+        #expect(medium.size.width > short.size.width)
+        #expect(medium.size.width < 130)
+        #expect(long.size.width > 240)
+    }
 }

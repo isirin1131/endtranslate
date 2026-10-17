@@ -82,12 +82,10 @@ final class PDFExporterTests {
         let text = try #require(output.string)
         #expect(text.contains("ORIGINAL_CONTENT"))
         #expect(text.contains("VECTOR_TRANSLATION"))
-        #expect(output.page(at: 0)?.bounds(for: .mediaBox) == CGRect(x: 0, y: 0, width: 400, height: 500))
+        #expect(output.page(at: 0)?.bounds(for: .mediaBox) == CGRect(x: 0, y: 0, width: 400 + PDFExporter.sidebarWidth, height: 500))
     }
 
-    @Test func hiddenAndUnfinishedAnnotationsAreNotExported() throws {
-        let hidden = annotation("HIDDENTRANSLATION")
-        hidden.showsOriginal = true
+    @Test func unfinishedAnnotationsAreNotExported() throws {
         let loading = annotation("LOADINGTRANSLATION")
         loading.status = .loading
         // A retry can still have a previous rendered result attached.
@@ -96,9 +94,12 @@ final class PDFExporterTests {
         )
         let failed = annotation("FAILEDTRANSLATION")
         failed.status = .failed("请求超时")
-        let text = try #require(export([hidden, loading, failed]).string)
+        let output = try export([loading, failed])
+        let text = try #require(output.string)
         #expect(text.contains("ORIGINAL_CONTENT"))
-        for excluded in ["HIDDENTRANSLATION", "LOADINGTRANSLATION", "STALE_RESULT", "FAILEDTRANSLATION"] {
+        // Pages without completed annotations keep their original mediaBox width.
+        #expect(output.page(at: 0)?.bounds(for: .mediaBox) == CGRect(x: 0, y: 0, width: 400, height: 500))
+        for excluded in ["LOADINGTRANSLATION", "STALE_RESULT", "FAILEDTRANSLATION"] {
             #expect(!text.contains(excluded))
         }
     }
@@ -107,19 +108,59 @@ final class PDFExporterTests {
         let source = PDFDocument(data: pdf(["PAGE_ONE", "PAGE_TWO"]))!
         let output = try export([annotation("SECONDPAGETRANSLATION", page: 1)], source: source)
         #expect(output.pageCount == 2)
+        #expect(output.page(at: 0)?.bounds(for: .mediaBox).width == 400)
+        #expect(output.page(at: 1)?.bounds(for: .mediaBox).width == 400 + PDFExporter.sidebarWidth)
         #expect(!output.page(at: 0)!.string!.contains("SECONDPAGETRANSLATION"))
         #expect(output.page(at: 1)!.string!.contains("SECONDPAGETRANSLATION"))
     }
 
-    @Test func expandedPageAndFallbackExportTogether() throws {
+    @Test func sideBySideCardsExportIntoRightSidebarWithoutSlicingOriginalPage() throws {
         let source = PDFDocument(data: pdf(["ORIGINAL_CONTENT"]))!
-        let note = annotation("GAPTRANSLATION")
-        let layout = GapLayout([PageGap(id: note.model.id, y: 330, height: 81)])
-        let expanded = try #require(PageGapper.build(from: source.page(at: 0)!, layout: layout, box: .mediaBox))
-        note.place(slotMinY: 330, slotHeight: 81, pageBounds: expanded.page.bounds(for: .mediaBox))
-        let output = try export([note], source: expanded.document)
-        #expect(output.page(at: 0)?.bounds(for: .mediaBox).height == 581)
-        #expect(output.string!.contains("ORIGINAL_CONTENT"))
-        #expect(output.string!.contains("GAPTRANSLATION"))
+        let left = annotation("LEFTCARDTRANSLATION")
+        left.model.rect = CGRect(x: 20, y: 300, width: 160, height: 50)
+        let right = annotation("RIGHTCARDTRANSLATION")
+        right.model.rect = CGRect(x: 210, y: 300, width: 160, height: 50)
+        let output = try export([right, left], source: source)
+        let pageBox = try #require(output.page(at: 0)?.bounds(for: .mediaBox))
+        #expect(pageBox.width == 400 + PDFExporter.sidebarWidth)
+        #expect(pageBox.height == 500)
+        #expect(left.bounds.minX > 400)
+        #expect(right.bounds.minX > 400)
+        #expect(!left.bounds.intersects(right.bounds))
+        // The fallback renderer may wrap long Latin words once it grows the font toward the
+        // comfort size, so compare without extracted line breaks.
+        let text = try #require(output.string).replacingOccurrences(of: "\n", with: "")
+        #expect(text.contains("ORIGINAL_CONTENT"))
+        #expect(text.contains("LEFTCARDTRANSLATION"))
+        #expect(text.contains("RIGHTCARDTRANSLATION"))
+    }
+
+    @Test func denseCardsExportInsideTheOriginalPageHeight() throws {
+        let notes = (0..<16).map { index -> TranslationAnnotation in
+            let note = annotation("DENSECARD\(index)")
+            note.model.rect = CGRect(
+                x: CGFloat(20 + (index * 37) % 300),
+                y: CGFloat(40 + (index * 53) % 380),
+                width: 160,
+                height: 24
+            )
+            return note
+        }
+        let output = try export(notes)
+        let pageBox = try #require(output.page(at: 0)?.bounds(for: .mediaBox))
+        #expect(pageBox == CGRect(x: 0, y: 0, width: 400 + PDFExporter.sidebarWidth, height: 500))
+        let top = 500 - CardSidebarLayout.pageVerticalInset
+        let bottom = CardSidebarLayout.pageVerticalInset
+        for note in notes {
+            #expect(note.bounds.minX >= 400)
+            #expect(note.bounds.maxX <= 400 + PDFExporter.sidebarWidth)
+            #expect(note.bounds.minY >= bottom - 0.001)
+            #expect(note.bounds.maxY <= top + 0.001)
+        }
+        for i in 0..<notes.count {
+            for j in (i + 1)..<notes.count {
+                #expect(!notes[i].bounds.intersects(notes[j].bounds))
+            }
+        }
     }
 }

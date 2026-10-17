@@ -3,6 +3,10 @@ import CoreGraphics
 
 /// A single vector PDF, shared by the reader, editor preview, and PDF export.
 final class RenderedTranslation: @unchecked Sendable {
+    /// Largest uniform scale used when fitting the vector into a card. With the 13pt
+    /// base render font this caps the displayed text at roughly 16pt.
+    static let maxContentScale: CGFloat = 1.25
+
     let pdfData: Data
     let size: CGSize
     private let document: CGPDFDocument
@@ -18,17 +22,34 @@ final class RenderedTranslation: @unchecked Sendable {
     }
 
     /// PDF and export contexts are y-up; the screen overlay is y-down.
+    ///
+    /// The card frame is resized by the viewport layout solver, so drawing must preserve the
+    /// rendered page's aspect ratio: use the tighter of the width/height ratios, cap comfort
+    /// enlargement at 1.45x, center vertically, and only center short labels horizontally.
     func draw(in rect: CGRect, context: CGContext, yDown: Bool = false) {
         guard let page = document.page(at: 1) else { return }
+        guard rect.width.isFinite, rect.height.isFinite, rect.width > 0, rect.height > 0 else { return }
         let box = page.getBoxRect(.mediaBox)
-        let scale = rect.width / box.width
+        guard box.width > 0, box.height > 0 else { return }
+        let scale = min(rect.width / box.width, rect.height / box.height, Self.maxContentScale)
+        guard scale.isFinite, scale > 0 else { return }
+        let drawWidth = box.width * scale
+        let drawHeight = box.height * scale
+        let yOffset = (rect.height - drawHeight) * 0.5
+        let xOffset: CGFloat
+        if box.width < rect.width * 0.75 && box.height < 28 {
+            xOffset = (rect.width - drawWidth) * 0.5
+        } else {
+            xOffset = 0
+        }
+
         context.saveGState()
         context.clip(to: rect)
         if yDown {
-            context.translateBy(x: rect.minX, y: rect.minY)
+            context.translateBy(x: rect.minX + xOffset, y: rect.minY + yOffset)
             context.scaleBy(x: 1, y: -1)
         } else {
-            context.translateBy(x: rect.minX, y: rect.maxY)
+            context.translateBy(x: rect.minX + xOffset, y: rect.maxY - yOffset)
         }
         context.scaleBy(x: scale, y: scale)
         context.translateBy(x: -box.minX, y: -box.maxY)

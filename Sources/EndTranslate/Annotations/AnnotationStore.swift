@@ -17,14 +17,6 @@ struct Sidecar: Codable {
 final class AnnotationStore {
     private(set) var annotations: [Annotation] = []
     private var views: [UUID: TranslationAnnotation] = [:]
-    /// Gap layout currently applied to each displayed page (pages without gaps are absent).
-    private var layouts: [Int: GapLayout] = [:]
-
-    func layout(for page: Int) -> GapLayout { layouts[page] ?? .empty }
-
-    func setLayout(_ layout: GapLayout, for page: Int) {
-        layouts[page] = layout.gaps.isEmpty ? nil : layout
-    }
 
     func add(_ model: Annotation, view: TranslationAnnotation) {
         annotations.append(model)
@@ -62,6 +54,5 @@ final class AnnotationStore {
     func removeAll() {
         annotations.removeAll()
         views.removeAll()
-        layouts.removeAll()
     }
 }

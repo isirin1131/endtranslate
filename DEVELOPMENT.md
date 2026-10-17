@@ -5,9 +5,9 @@
 ## 数据与显示
 
 - `Annotation` 保存原始页索引、PDF 页面坐标中的选区、Markdown/LaTeX 译文及创建时间。
-- `AnnotationStore` 管理译注和临时显示状态。`TranslationAnnotation` 是普通 Swift 对象；译文由视口上的 `SelectionOverlay` 绘制。
-- `PDFViewModel` 保留一份原始 PDF 用于截图，另一份用于显示。`PageGapper` 把原页按译文插入位置切成矢量条带，再排列到加高的页面中。
-- `GapLayout` 转换原始页坐标与显示坐标。选区、阅读位置和目录目标始终保存原始坐标，因此插入或收起译文不会改变它们指向的内容。
+- `AnnotationStore` 管理译注和临时显示状态。`TranslationAnnotation` 是普通 Swift 对象。
+- `ReaderWorkspaceView` 采用窗口左右独立面板布局：左侧为保持原始版式不变的 `PDFView`，右侧为存放译文悬浮卡片的侧边栏（可拖拽分栏线调整宽度）。
+- `SelectionOverlay` 跨越左右面板，在左侧绘制原文高亮框，在右侧根据译文内容自适应计算卡片宽高。只有原文高亮框当前位于 PDF 可视区域内时，对应译文才参与侧边栏排版；离屏译文立即清空 `bounds` 并释放空间。`CardSidebarLayout` 先用 Knuth-Plass 动态规划分行（行内按权重 100% 撑满侧边栏宽度，短标签可在高卡片旁堆叠为子列），再用 Box-and-Glue 规则放大或压缩行高，确保所有在屏译文完整装入侧边栏，最后由 PAVA 保序回归贴近原文锚点且不重叠；`CardConnector` 绘制三次贝塞尔连线将原文框与译文卡片关联起来。
 - 待确认选区只有在点击“翻译”或按 Return 后才截图和提交。移动、缩放及取消都在本机完成。
 
 ## 渲染
@@ -28,7 +28,7 @@
 
 - `AnnotationPersistence` 只在写入或删除成功后清除未保存标记。切换文档、关窗和退出前均检查保存结果；失败时保留内存中的改动并提供重试。
 - `SidecarIO` 检查 PDF 的 SHA-256 和数据版本。已有文件损坏或不匹配时，覆盖前必须先成功备份，已存在的备份不会覆盖。
-- `PDFExporter` 使用 Core Graphics 按页绘制当前展开的 PDF 与已完成译文。公式保持矢量，渲染尚未完成的译文可按文本导出。
+- `PDFExporter` 使用 Core Graphics 按页绘制原始 PDF 与右侧栏已完成译文卡片及连线。公式保持矢量，渲染尚未完成的译文可按文本导出。
 - API Key 只存入钥匙串，按应用 bundle ID 隔离。命令行构建转为正式应用时，仍保留设置和阅读历史迁移。
 - 运行日志使用 macOS 统一日志，动态消息默认私有；不记录 API 响应正文。
 

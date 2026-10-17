@@ -1,10 +1,48 @@
 import SwiftUI
 import PDFKit
 
+/// Hosts the PDFView in the left panel and the floating card sidebar in the right panel,
+/// with SelectionOverlay spanning both so leader lines can connect source boxes to sidebar cards.
+final class ReaderWorkspaceView: NSView {
+    let pdfView: PDFView
+    let overlay: SelectionOverlay
+    var onSidebarWidthUpdate: (() -> Void)?
+
+    init(pdfView: PDFView, overlay: SelectionOverlay) {
+        self.pdfView = pdfView
+        self.overlay = overlay
+        super.init(frame: .zero)
+        autoresizesSubviews = false
+        addSubview(pdfView)
+        addSubview(overlay)
+        overlay.onSidebarWidthChange = { [weak self] in
+            self?.needsLayout = true
+            self?.layoutSubtreeIfNeeded()
+            self?.onSidebarWidthUpdate?()
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        overlay.frame = bounds
+        let targetPDFRect = overlay.pdfPanelRect
+        if pdfView.frame != targetPDFRect {
+            pdfView.frame = targetPDFRect
+            if pdfView.autoScales {
+                pdfView.layoutDocumentView()
+            }
+            onSidebarWidthUpdate?()
+        }
+    }
+}
+
 struct PDFDocumentView: NSViewRepresentable {
     @ObservedObject var model: PDFViewModel
 
-    func makeNSView(context: Context) -> PDFView {
+    func makeNSView(context: Context) -> ReaderWorkspaceView {
         let view = PDFView()
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
@@ -13,17 +51,13 @@ struct PDFDocumentView: NSViewRepresentable {
         view.backgroundColor = .underPageBackgroundColor
         model.pdfView = view
         let overlay = SelectionOverlay(pdfView: view)
-        overlay.frame = view.bounds
         overlay.store = model.store
-        view.addSubview(overlay)
+        let workspace = ReaderWorkspaceView(pdfView: view, overlay: overlay)
         overlay.onSelection = { [weak model] page, rect in
             model?.handleSelection(pageIndex: page, rect: rect) ?? true
         }
         overlay.onClickAnnotation = { [weak model] annotation in
             model?.click(annotation)
-        }
-        overlay.onToggleOriginal = { [weak model] annotation in
-            model?.toggleOriginal(annotation)
         }
         overlay.onEditAnnotation = { [weak model] annotation in
             model?.beginEdit(annotation)
@@ -43,10 +77,13 @@ struct PDFDocumentView: NSViewRepresentable {
         overlay.onViewportChange = { [weak model] in
             model?.viewportDidChange()
         }
+        workspace.onSidebarWidthUpdate = { [weak model] in
+            model?.sidebarWidthDidChange()
+        }
         if let doc = model.document {
             view.document = doc
         }
-        return view
+        return workspace
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -55,14 +92,15 @@ struct PDFDocumentView: NSViewRepresentable {
         weak var document: PDFDocument?
     }
 
-    func updateNSView(_ nsView: PDFView, context: Context) {
+    func updateNSView(_ nsView: ReaderWorkspaceView, context: Context) {
         // The model installs documents itself (it needs the view laid out right away);
         // here we only drop interaction state that belonged to the previous one.
         guard context.coordinator.document !== model.document else { return }
         context.coordinator.document = model.document
-        if nsView.document !== model.document {
-            nsView.document = model.document
+        if nsView.pdfView.document !== model.document {
+            nsView.pdfView.document = model.document
         }
-        nsView.subviews.compactMap { $0 as? SelectionOverlay }.forEach { $0.clearPending() }
+        nsView.overlay.clearPending()
     }
 }
+

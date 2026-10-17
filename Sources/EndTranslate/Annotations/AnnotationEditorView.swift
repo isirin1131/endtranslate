@@ -128,7 +128,7 @@ struct AnnotationEditorView: View {
         defer { if !Task.isCancelled { rendering = false } }
         try? await Task.sleep(nanoseconds: 350_000_000)
         if Task.isCancelled { return }
-        let doc = try? await MarkdownRenderer.shared.render(markdown: source, width: width, fontSize: 10)
+        let doc = try? await MarkdownRenderer.shared.render(markdown: source, width: width, fontSize: TranslationAnnotation.renderFontSize)
         guard !Task.isCancelled else { return }
         if let image = doc?.nsImage(scale: 2) {
             preview = image

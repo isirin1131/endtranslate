@@ -23,7 +23,7 @@ enum MarkdownRenderError: LocalizedError {
 final class MarkdownRenderer: NSObject, WKNavigationDelegate {
     static let shared = MarkdownRenderer()
     // Bump after changing the renderer, CSS, or bundled libraries.
-    private static let cacheVersion = 1
+    private static let cacheVersion = 2
     private static let memoryLimit = 32 * 1024 * 1024
 
     private struct Job {
@@ -31,6 +31,7 @@ final class MarkdownRenderer: NSObject, WKNavigationDelegate {
         let markdown: String
         let width: CGFloat
         let fontSize: CGFloat
+        let fitToContent: Bool
     }
 
     private let resources: URL?
@@ -61,11 +62,12 @@ final class MarkdownRenderer: NSObject, WKNavigationDelegate {
         purgeOldEntries()
     }
 
-    func render(markdown: String, width: CGFloat, fontSize: CGFloat) async throws -> RenderedTranslation {
+    func render(markdown: String, width: CGFloat, fontSize: CGFloat, fitToContent: Bool = false) async throws -> RenderedTranslation {
         try Task.checkCancellation()
-        guard width.isFinite, fontSize.isFinite, width >= 40, width <= 4_000,
+        guard width.isFinite, fontSize.isFinite, width >= 24, width <= 4_000,
               fontSize >= 4, fontSize <= 100 else { throw MarkdownRenderError.invalidSize }
-        let payload = "\(Self.cacheVersion)|\(width)|\(fontSize)|\(markdown)"
+        let mode = fitToContent ? "|fit" : ""
+        let payload = "\(Self.cacheVersion)\(mode)|\(width)|\(fontSize)|\(markdown)"
         let key = SHA256.hash(data: Data(payload.utf8)).map { String(format: "%02x", $0) }.joined()
         if let hit = memory[key] {
             touch(key)
@@ -82,7 +84,7 @@ final class MarkdownRenderer: NSObject, WKNavigationDelegate {
                 waiters[key]?.append(continuation)
             } else {
                 waiters[key] = [continuation]
-                jobs.append(Job(key: key, markdown: markdown, width: width, fontSize: fontSize))
+                jobs.append(Job(key: key, markdown: markdown, width: width, fontSize: fontSize, fitToContent: fitToContent))
             }
             if worker == nil { worker = Task { await drain() } }
         }
@@ -120,15 +122,91 @@ final class MarkdownRenderer: NSObject, WKNavigationDelegate {
         view.setFrameSize(NSSize(width: job.width, height: 100))
         let metrics: Any = try await perform("排版译文") { completion in
             view.callAsyncJavaScript(
-                "return await EndTranslate.render(markdown, width, fontSize);",
-                arguments: ["markdown": job.markdown, "width": job.width, "fontSize": job.fontSize],
+                """
+                document.body.style.width = `${width}px`;
+                const root = document.getElementById('translation');
+                root.style.maxWidth = '';
+                root.style.padding = fitToContent ? '2px 3px' : '';
+                root.style.lineHeight = fitToContent ? '1.42' : '';
+                const result = await EndTranslate.render(markdown, width, fontSize);
+                if (!fitToContent) {
+                    return { width: width, height: result.height, formulas: result.formulas, errors: result.errors };
+                }
+                for (const p of root.querySelectorAll('p')) {
+                    p.style.margin = '0 0 0.28em';
+                }
+                for (const list of root.querySelectorAll('ul, ol')) {
+                    list.style.margin = '0.2em 0 0.28em';
+                    list.style.paddingLeft = '1.2em';
+                }
+                for (const li of root.querySelectorAll('li')) {
+                    li.style.margin = '0.08em 0';
+                }
+                if (root.firstElementChild) root.firstElementChild.style.marginTop = '0';
+                if (root.lastElementChild) root.lastElementChild.style.marginBottom = '0';
+                const initialHeight = Math.max(14, Math.ceil(root.getBoundingClientRect().height));
+                if (root.querySelector('table')) {
+                    return { width: width, height: initialHeight, formulas: result.formulas, errors: result.errors };
+                }
+                const rootRect = root.getBoundingClientRect();
+                const range = document.createRange();
+                let maxRight = rootRect.left;
+                const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+                let node;
+                while ((node = walker.nextNode())) {
+                    if (node.nodeType === Node.TEXT_NODE) {
+                        if (!node.nodeValue || !node.nodeValue.trim()) continue;
+                        range.selectNodeContents(node);
+                        for (const r of range.getClientRects()) {
+                            if (r.width > 0 && r.right > maxRight) maxRight = r.right;
+                        }
+                    } else if (node.nodeType === Node.ELEMENT_NODE) {
+                        const tag = node.tagName;
+                        if (tag === 'MJX-CONTAINER' || tag === 'CODE' || tag === 'PRE' || tag === 'HR' || tag === 'BLOCKQUOTE') {
+                            const r = node.getBoundingClientRect();
+                            if (r.width > 0 && r.right > maxRight) maxRight = r.right;
+                        }
+                    }
+                }
+                let fittedWidth = width;
+                if (maxRight > rootRect.left) {
+                    fittedWidth = Math.min(width, Math.max(24, Math.ceil(maxRight - rootRect.left + 5)));
+                }
+                root.style.width = `${fittedWidth}px`;
+                let fittedHeight = Math.max(14, Math.ceil(root.getBoundingClientRect().height));
+                if (fittedHeight > initialHeight + 1 && fittedWidth < width) {
+                    const retryWidth = Math.min(width, fittedWidth + 6);
+                    root.style.width = `${retryWidth}px`;
+                    fittedHeight = Math.max(14, Math.ceil(root.getBoundingClientRect().height));
+                    if (fittedHeight > initialHeight + 1) {
+                        fittedWidth = width;
+                        root.style.width = `${width}px`;
+                        fittedHeight = initialHeight;
+                    } else {
+                        fittedWidth = retryWidth;
+                    }
+                }
+                return { width: fittedWidth, height: fittedHeight, formulas: result.formulas, errors: result.errors };
+                """,
+                arguments: [
+                    "markdown": job.markdown,
+                    "width": job.width,
+                    "fontSize": job.fontSize,
+                    "fitToContent": job.fitToContent
+                ],
                 in: nil, in: .page, completionHandler: completion
             )
         }
         guard let metrics = metrics as? [String: Any], let height = metrics["height"] as? Double,
               height.isFinite, height > 0, height <= 100_000 else { throw MarkdownRenderError.invalidSize }
+        let finalWidth: CGFloat
+        if job.fitToContent, let w = metrics["width"] as? Double, w.isFinite, w >= 24, w <= job.width {
+            finalWidth = ceil(CGFloat(w))
+        } else {
+            finalWidth = job.width
+        }
         let configuration = WKPDFConfiguration()
-        configuration.rect = CGRect(x: 0, y: 0, width: job.width, height: ceil(height))
+        configuration.rect = CGRect(x: 0, y: 0, width: finalWidth, height: ceil(height))
         let data: Data = try await perform("生成译文预览") { completion in
             view.createPDF(configuration: configuration, completionHandler: completion)
         }
@@ -272,12 +350,16 @@ final class MarkdownRenderer: NSObject, WKNavigationDelegate {
     private func purgeLegacyCaches(base: URL, application: String) {
         var candidates = [
             base.appendingPathComponent("\(application)/typst"),
-            base.appendingPathComponent("EndTranslate/typst")
+            base.appendingPathComponent("EndTranslate/typst"),
+            base.appendingPathComponent("\(application)/translations-v1"),
+            base.appendingPathComponent("EndTranslate/translations-v1")
         ]
         let parent = cacheDirectory.deletingLastPathComponent()
         candidates.append(parent.appendingPathComponent("typst"))
+        let currentPath = cacheDirectory.standardizedFileURL.path
         for dir in candidates {
-            if FileManager.default.fileExists(atPath: dir.path) {
+            let path = dir.standardizedFileURL.path
+            if path != currentPath, FileManager.default.fileExists(atPath: path) {
                 try? FileManager.default.removeItem(at: dir)
             }
         }
