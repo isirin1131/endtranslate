@@ -121,10 +121,17 @@ private struct EmptyStateView: View {
 
     var body: some View {
         VStack(spacing: 22) {
-            Image(systemName: "text.viewfinder")
-                .font(.system(size: 56, weight: .thin))
-                .foregroundStyle(dropTargeted ? Color.accentColor : Color.secondary)
-                .symbolEffect(.bounce, value: dropTargeted)
+            ZStack {
+                Circle()
+                    .fill(Color(nsColor: ReaderTheme.chromeAccent).opacity(0.10))
+                    .frame(width: 96, height: 96)
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 44, weight: .thin))
+                    .foregroundStyle(dropTargeted
+                        ? Color(nsColor: ReaderTheme.chromeAccent)
+                        : Color.secondary)
+                    .symbolEffect(.bounce, value: dropTargeted)
+            }
 
             VStack(spacing: 6) {
                 Text("拖入 PDF 开始阅读")
@@ -173,11 +180,20 @@ private struct EmptyStateView: View {
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.background)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(nsColor: ReaderTheme.sidebarTop),
+                    Color(nsColor: ReaderTheme.sidebarBottom)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+        )
         .overlay {
             if dropTargeted {
                 RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color.accentColor, lineWidth: 3)
+                    .strokeBorder(Color(nsColor: ReaderTheme.chromeAccent), lineWidth: 3)
                     .padding(8)
                     .allowsHitTesting(false)
             }
@@ -248,13 +264,19 @@ private struct ExportProgressView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 8) {
-                Image(systemName: "square.and.arrow.up")
-                    .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(Color(nsColor: ReaderTheme.chromeAccent).opacity(0.12))
+                        .frame(width: 30, height: 30)
+                    Image(systemName: "square.and.arrow.up")
+                        .foregroundStyle(Color(nsColor: ReaderTheme.chromeAccent))
+                }
                 Text(model.exportPhase.isEmpty ? "正在导出…" : model.exportPhase)
                     .font(.headline)
             }
             ProgressView(value: min(max(model.exportFraction, 0), 1))
+                .tint(Color(nsColor: ReaderTheme.chromeAccent))
             HStack {
                 Text(model.exportDetail)
                     .font(.caption)

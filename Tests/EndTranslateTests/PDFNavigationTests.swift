@@ -185,9 +185,37 @@ struct PDFNavigationTests {
         let sourceOverlay = CGRect(x: 50, y: 118, width: 220, height: 60)
         let connector = CardConnector(sourceRect: sourceOverlay, cardRect: placed[0].frame, minSourceX: 6, maxSourceX: 600)
         #expect(connector.start.x == sourceOverlay.maxX)
+        #expect(connector.start.y == sourceOverlay.midY)
         #expect(connector.end.x == placed[0].frame.minX)
         #expect(connector.control1.x > connector.start.x)
         #expect(connector.control2.x < connector.end.x)
+    }
+
+    @Test func sideBySideSourcesWithSlightlyDifferentTopsKeepLeftToRightOrder() {
+        let left = SidebarCardSpec(
+            id: UUID(),
+            page: 0,
+            sourceRect: CGRect(x: 150, y: 480, width: 160, height: 18),
+            desiredY: 480,
+            height: 40,
+            pageMinY: 0,
+            pageMaxY: 900
+        )
+        let right = SidebarCardSpec(
+            id: UUID(),
+            page: 0,
+            sourceRect: CGRect(x: 420, y: 470, width: 80, height: 18),
+            desiredY: 470,
+            height: 30,
+            pageMinY: 0,
+            pageMaxY: 900
+        )
+        // The tops differ by 10pt (more than the old 6pt band threshold), but the boxes
+        // overlap vertically, so reading order must still be left-to-right.
+        let ordered = CardSidebarLayout.sortInReadingOrder(
+            [right, left], page: \.page, rect: \.sourceRect, id: \.id
+        )
+        #expect(ordered.map(\.id) == [left.id, right.id])
     }
 
     @MainActor

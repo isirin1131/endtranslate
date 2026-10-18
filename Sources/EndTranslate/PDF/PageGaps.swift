@@ -81,13 +81,29 @@ struct CardConnector: Equatable {
 
     init(sourceRect: CGRect, cardRect: CGRect, minSourceX: CGFloat = -.greatestFiniteMagnitude,
          maxSourceX: CGFloat = .greatestFiniteMagnitude) {
-        let sx = min(max(sourceRect.maxX, minSourceX), maxSourceX)
-        let syInset = min(6, sourceRect.height * 0.5)
-        let sy = min(max(cardRect.midY, sourceRect.minY + syInset), sourceRect.maxY - syInset)
+        let source = sourceRect.standardized
+        let card = cardRect.standardized
+        let valid = source.width.isFinite && source.height.isFinite
+            && source.minX.isFinite && source.minY.isFinite
+            && card.width.isFinite && card.height.isFinite
+            && card.minX.isFinite && card.minY.isFinite
+            && !source.isNull && !source.isEmpty && !card.isNull && !card.isEmpty
+        guard valid else {
+            self.start = .zero
+            self.end = .zero
+            self.control1 = .zero
+            self.control2 = .zero
+            return
+        }
 
-        let ex = cardRect.minX
-        let eyInset = min(12, cardRect.height * 0.5)
-        let ey = min(max(sy, cardRect.minY + eyInset), cardRect.maxY - eyInset)
+        // Leave the source at its vertical center and enter the card at the nearest point.
+        // Using the card's midpoint for the start (the old behavior) made lines drift away
+        // from the paragraph they belonged to and converge into a single fan.
+        let sx = min(max(source.maxX, minSourceX), maxSourceX)
+        let sy = source.midY
+        let ex = card.minX
+        let eyInset = min(12, card.height * 0.5)
+        let ey = min(max(sy, card.minY + eyInset), card.maxY - eyInset)
 
         let span = max(ex - sx, 24)
         self.start = CGPoint(x: sx, y: sy)
@@ -99,6 +115,11 @@ struct CardConnector: Equatable {
     func addPath(to context: CGContext) {
         context.move(to: start)
         context.addCurve(to: end, control1: control1, control2: control2)
+    }
+
+    func addPath(to path: CGMutablePath) {
+        path.move(to: start)
+        path.addCurve(to: end, control1: control1, control2: control2)
     }
 }
 
@@ -162,13 +183,23 @@ enum CardSidebarLayout {
         var index = 0
         while index < base.count {
             let bandPage = page(base[index])
-            let anchorY = rect(base[index]).minY
-            let anchorHeight = max(rect(base[index]).height, 1)
+            let anchorRect = rect(base[index])
+            let anchorY = anchorRect.minY
+            let anchorHeight = max(anchorRect.height, 1)
             var band: [T] = []
             while index < base.count, page(base[index]) == bandPage {
                 let r = rect(base[index])
                 let threshold = max(6, 0.35 * min(anchorHeight, max(r.height, 1)))
-                if !band.isEmpty, r.minY - anchorY > threshold { break }
+                let minHeight = max(min(anchorHeight, max(r.height, 1)), 1)
+                // Side-by-side captions often differ by more than the old 6pt top threshold.
+                // If their vertical ranges overlap substantially (or their centers are close),
+                // they belong to the same visual row and must be ordered left-to-right;
+                // otherwise the cards get the opposite column order and their leader lines
+                // cross for no reason.
+                let overlap = max(0, min(anchorRect.maxY, r.maxY) - max(anchorRect.minY, r.minY))
+                let overlaps = overlap >= 0.35 * minHeight
+                let centersClose = abs(anchorRect.midY - r.midY) <= 0.5 * minHeight
+                if !band.isEmpty, r.minY - anchorY > threshold, !overlaps, !centersClose { break }
                 band.append(base[index])
                 index += 1
             }

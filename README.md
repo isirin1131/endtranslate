@@ -4,7 +4,7 @@
 
 A native macOS PDF reader with inline translation, LaTeX math rendering, and annotated PDF export. Built with SwiftUI, AppKit, and PDFKit.
 
-当前版本 **1.2.0**。可从 [GitHub Releases](https://github.com/isirin1131/endtranslate/releases/latest) 下载 Apple Silicon 版应用；Intel Mac 请从源码构建。下载包采用本地签名，尚未经过 Apple 公证。
+当前版本 **1.3.0**。可从 [GitHub Releases](https://github.com/isirin1131/endtranslate/releases/latest) 下载 Apple Silicon 版应用；Intel Mac 请从源码构建。下载包采用本地签名，尚未经过 Apple 公证。
 
 ## 环境
 
@@ -51,6 +51,7 @@ zsh scripts/make-app.sh
 
 - 拖拽框选后，可以拖动四角或边缘调整范围，也可以拖动框内移动整个选区。按 Return 或点击“翻译”才会提交；Esc 或“取消”放弃选区。
 - 左侧 PDF 视图保持原文档排版，右侧只显示当前窗口内可见原文对应的译文；卡片按内容权重撑满侧边栏宽度，稀疏时自动舒展、密集时压缩至一屏内，并通过连线关联对应段落；即使在已有高亮框内也可直接再次拖拽框选。
+- 鼠标移到原文高亮框或译文卡片上时，成对的两框会同步高亮，并只显示这一对之间的引线；空闲时引线会随可见卡片数量自动变淡或隐藏，避免密集排版被连线淹没。
 - 在顶部页码框输入页数，按 Return 跳转；⌘L 可直接选中页码。左右箭头按钮或 ⌥⌘← / ⌥⌘→ 切换上一页、下一页。页码从 PDF 的第一页开始计数。
 - 点击工具栏“目录”或按 ⌥⌘1 展开侧栏，点击章节跳转。支持分层目录；没有内嵌目录的 PDF 可使用页码跳转。
 - 双击译文卡片或原文高亮框可编辑译文；编辑器中按 ⌘Return 保存。

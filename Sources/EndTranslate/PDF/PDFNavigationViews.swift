@@ -166,7 +166,9 @@ struct PDFOutlineSidebar: View {
                     .buttonStyle(.plain)
                     .disabled(entry.target == nil)
                     .help(entry.title)
-                    .listRowBackground(model.selectedOutlineID == entry.id ? Color.accentColor.opacity(0.15) : Color.clear)
+                    .listRowBackground(model.selectedOutlineID == entry.id
+                        ? Color(nsColor: ReaderTheme.chromeAccent).opacity(0.14)
+                        : Color.clear)
                 }
                 .listStyle(.sidebar)
             }

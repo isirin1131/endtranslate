@@ -68,8 +68,10 @@ struct AnnotationEditorView: View {
                                     .resizable()
                                     .aspectRatio(contentMode: .fit)
                                     .frame(maxWidth: width)
-                                    .background(Color.white)
-                                    .overlay(Rectangle().stroke(Color.secondary.opacity(0.4), lineWidth: 0.5))
+                                    .background(Color(nsColor: ReaderTheme.cardPaper))
+                                    .overlay(Rectangle()
+                                        .stroke(Color(nsColor: ReaderTheme.cardBorder), lineWidth: 0.5))
+                                    .shadow(color: .black.opacity(0.10), radius: 8, y: 2)
                             } else if let previewError {
                                 Text(previewError)
                                     .font(.caption)

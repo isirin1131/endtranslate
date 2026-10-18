@@ -61,6 +61,7 @@ final class SelectionOverlay: NSView {
     private weak var menuAnnotation: TranslationAnnotation?
     private weak var hovered: TranslationAnnotation?
     private var hoveredChipButton: Int?
+    private var dividerHovered = false
     private var dropHighlight = false
 
     private static var invalidateHandler: (() -> Void)?
@@ -249,15 +250,18 @@ final class SelectionOverlay: NSView {
     }
 
     override func mouseExited(with event: NSEvent) {
+        setDividerHovered(false)
         setHovered(nil, chipButton: nil)
     }
 
     private func updateHover(at p: NSPoint) {
         if isResizingSidebar || isNearDivider(p) {
+            setDividerHovered(true)
             setHovered(nil, chipButton: nil)
             NSCursor.resizeLeftRight.set()
             return
         }
+        setDividerHovered(false)
         if let adjustment {
             setHovered(nil, chipButton: nil)
             cursor(for: adjustment.kind, dragging: true).set()
@@ -291,6 +295,17 @@ final class SelectionOverlay: NSView {
         guard annotation !== hovered || chipButton != hoveredChipButton else { return }
         hovered = annotation
         hoveredChipButton = chipButton
+        needsDisplay = true
+    }
+
+    private func setDividerHovered(_ isHovered: Bool) {
+        guard isHovered != dividerHovered else { return }
+        dividerHovered = isHovered
+        needsDisplay = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
     }
 
@@ -461,7 +476,8 @@ final class SelectionOverlay: NSView {
 
     private func annotation(at overlayPoint: NSPoint) -> TranslationAnnotation? {
         guard let store else { return nil }
-        layoutSidebarCards()
+        // Card frames from the last layout pass are already in `bounds`; laying out again on
+        // every mouseMoved would additionally kick off lazy typesetting while merely hovering.
         if overlayPoint.x >= sidebarRect.minX {
             // Hit-test floating cards in the right sidebar.
             for model in store.annotations.reversed() {
@@ -851,20 +867,230 @@ final class SelectionOverlay: NSView {
 
     // MARK: drawing
 
-    private static let accent = NSColor.systemBlue
+    private struct VisibleConnectorPair {
+        let view: TranslationAnnotation
+        let sourceRect: CGRect
+        let cardRect: CGRect
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         layoutSidebarCards()
+
+        let pairs = visibleConnectorPairs()
+        guard let activePair = pairs.first(where: { $0.view === hovered }) else {
+            if hovered != nil { hovered = nil }
+            drawSidebarContent(pairs: pairs, activePair: nil, in: ctx, dirtyRect: dirtyRect)
+            return
+        }
+        drawSidebarContent(pairs: pairs, activePair: activePair, in: ctx, dirtyRect: dirtyRect)
+    }
+
+    private func drawSidebarContent(
+        pairs: [VisibleConnectorPair],
+        activePair: VisibleConnectorPair?,
+        in ctx: CGContext,
+        dirtyRect: CGRect
+    ) {
         drawSidebarBackdrop(in: ctx, dirtyRect: dirtyRect)
-        drawSourceHighlightsAndSelection(in: ctx, dirtyRect: dirtyRect)
-        drawConnectors(in: ctx, onlyHovered: false)
+        if ConnectorStyle.shouldDrawQuiet(count: pairs.count, hovering: activePair != nil) {
+            drawQuietConnectors(pairs, in: ctx)
+        }
+        drawSourceHighlights(in: ctx, dirtyRect: dirtyRect, anyHovered: activePair != nil)
         drawSidebarCards(in: ctx, dirtyRect: dirtyRect)
-        drawConnectors(in: ctx, onlyHovered: true)
+        if let activePair {
+            drawActiveConnector(activePair, in: ctx)
+            drawActiveEndpoint(activePair, in: ctx)
+        }
+        drawSelectionChrome()
         if dropHighlight { drawDropHighlight() }
     }
 
-    private func drawSourceHighlightsAndSelection(in ctx: CGContext, dirtyRect: CGRect) {
+    private func visibleConnectorPairs() -> [VisibleConnectorPair] {
+        guard let store, pdfView?.document != nil else { return [] }
+        let visibleVertical = bounds.insetBy(dx: 0, dy: -80)
+        var pairs: [VisibleConnectorPair] = []
+        pairs.reserveCapacity(store.annotations.count)
+        for model in store.annotations {
+            guard let view = store.view(for: model.id), !view.bounds.isEmpty,
+                  let source = sourceRect(for: model) else { continue }
+            let cardRect = view.bounds
+            guard source.maxY >= visibleVertical.minY, source.minY <= visibleVertical.maxY,
+                  cardRect.maxY >= visibleVertical.minY, cardRect.minY <= visibleVertical.maxY else { continue }
+            pairs.append(VisibleConnectorPair(view: view, sourceRect: source, cardRect: cardRect))
+        }
+        return pairs
+    }
+
+    private func connector(for pair: VisibleConnectorPair) -> CardConnector {
+        CardConnector(
+            sourceRect: pair.sourceRect,
+            cardRect: pair.cardRect,
+            minSourceX: 6,
+            maxSourceX: max(sidebarRect.minX - 6, 6)
+        )
+    }
+
+    /// One combined path, clipped into the PDF panel and the sidebar so the line can use a
+    /// surface-appropriate accent on each side. Sparse viewports only; dense ones draw no
+    /// idle leader lines at all.
+    private func drawQuietConnectors(_ pairs: [VisibleConnectorPair], in ctx: CGContext) {
+        guard !pairs.isEmpty else { return }
+        let alpha = ConnectorStyle.quietAlpha(for: pairs.count)
+        guard alpha > 0 else { return }
+
+        let path = CGMutablePath()
+        for pair in pairs {
+            connector(for: pair).addPath(to: path)
+        }
+
+        ctx.saveGState()
+        ctx.setLineWidth(ConnectorStyle.quietLineWidth)
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+
+        ctx.saveGState()
+        ctx.clip(to: pdfPanelRect)
+        ctx.setStrokeColor(ReaderTheme.inkAccent.withAlphaComponent(alpha).cgColor)
+        ctx.addPath(path)
+        ctx.strokePath()
+        ctx.restoreGState()
+
+        ctx.saveGState()
+        ctx.clip(to: sidebarRect)
+        ctx.setStrokeColor(ReaderTheme.chromeAccent.withAlphaComponent(alpha).cgColor)
+        ctx.addPath(path)
+        ctx.strokePath()
+        ctx.restoreGState()
+
+        ctx.restoreGState()
+    }
+
+    /// The hovered pair gets the only visible leader line: a soft halo plus a crisp stroke.
+    /// The sidebar half is clipped around every card so it never runs across card content.
+    private func drawActiveConnector(_ pair: VisibleConnectorPair, in ctx: CGContext) {
+        let onPaper = pair.view.isFailed ? ReaderTheme.inkError : ReaderTheme.inkAccent
+        let onChrome = pair.view.isFailed ? ReaderTheme.chromeError : ReaderTheme.chromeAccent
+        let path = CGMutablePath()
+        connector(for: pair).addPath(to: path)
+
+        ctx.saveGState()
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+
+        ctx.saveGState()
+        ctx.clip(to: pdfPanelRect)
+        ctx.setStrokeColor(onPaper.withAlphaComponent(0.14).cgColor)
+        ctx.setLineWidth(ConnectorStyle.activeHaloWidth)
+        ctx.addPath(path)
+        ctx.strokePath()
+        ctx.setStrokeColor(onPaper.withAlphaComponent(0.92).cgColor)
+        ctx.setLineWidth(ConnectorStyle.activeLineWidth)
+        ctx.addPath(path)
+        ctx.strokePath()
+        ctx.restoreGState()
+
+        ctx.saveGState()
+        clipToSidebar(excludingCardsIn: ctx)
+        ctx.setStrokeColor(onChrome.withAlphaComponent(0.18).cgColor)
+        ctx.setLineWidth(ConnectorStyle.activeHaloWidth)
+        ctx.addPath(path)
+        ctx.strokePath()
+        ctx.setStrokeColor(onChrome.withAlphaComponent(0.95).cgColor)
+        ctx.setLineWidth(ConnectorStyle.activeLineWidth)
+        ctx.addPath(path)
+        ctx.strokePath()
+        ctx.restoreGState()
+
+        ctx.restoreGState()
+    }
+
+    private func drawActiveEndpoint(_ pair: VisibleConnectorPair, in ctx: CGContext) {
+        let connector = connector(for: pair)
+        let color = pair.view.isFailed ? ReaderTheme.inkError : ReaderTheme.inkAccent
+        let radius = ConnectorStyle.cardEndpointRadius
+        let center = connector.end
+        ctx.saveGState()
+        ctx.setFillColor(NSColor.white.cgColor)
+        ctx.fillEllipse(in: CGRect(x: center.x - radius - 1.2, y: center.y - radius - 1.2,
+                                   width: (radius + 1.2) * 2, height: (radius + 1.2) * 2))
+        ctx.setFillColor(color.withAlphaComponent(0.95).cgColor)
+        ctx.fillEllipse(in: CGRect(x: center.x - radius, y: center.y - radius,
+                                   width: radius * 2, height: radius * 2))
+        ctx.restoreGState()
+    }
+
+    private func clipToSidebar(excludingCardsIn ctx: CGContext) {
+        let clipPath = CGMutablePath()
+        clipPath.addRect(sidebarRect)
+        if let store {
+            let radius = SidebarCardStyle.cornerRadius
+            for model in store.annotations {
+                guard let view = store.view(for: model.id), !view.bounds.isEmpty,
+                      view.bounds.intersects(sidebarRect) else { continue }
+                let rect = view.bounds
+                let corner = min(radius, min(rect.width, rect.height) * 0.35)
+                clipPath.addPath(CGPath(roundedRect: rect, cornerWidth: corner,
+                                        cornerHeight: corner, transform: nil))
+            }
+        }
+        ctx.addPath(clipPath)
+        ctx.clip(using: .evenOdd)
+    }
+
+    private func drawSidebarBackdrop(in ctx: CGContext, dirtyRect: CGRect) {
+        let sRect = sidebarRect
+        guard sRect.intersects(dirtyRect) else { return }
+
+        ctx.saveGState()
+        ctx.clip(to: sRect)
+
+        let colors = [ReaderTheme.sidebarTop.cgColor, ReaderTheme.sidebarBottom.cgColor] as CFArray
+        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                     colors: colors, locations: [0, 1]) {
+            ctx.drawLinearGradient(
+                gradient,
+                start: CGPoint(x: sRect.midX, y: sRect.minY),
+                end: CGPoint(x: sRect.midX, y: sRect.maxY),
+                options: []
+            )
+        } else {
+            ctx.setFillColor(ReaderTheme.sidebarTop.cgColor)
+            ctx.fill(sRect)
+        }
+
+        // A soft inward shadow makes the divider read as a physical panel edge.
+        let shadowColors = [ReaderTheme.sidebarInnerShadow.cgColor, NSColor.clear.cgColor] as CFArray
+        if let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                     colors: shadowColors, locations: [0, 1]) {
+            ctx.saveGState()
+            ctx.clip(to: CGRect(x: sRect.minX, y: 0, width: 16, height: sRect.height))
+            ctx.drawLinearGradient(
+                gradient,
+                start: CGPoint(x: sRect.minX, y: sRect.midY),
+                end: CGPoint(x: sRect.minX + 16, y: sRect.midY),
+                options: []
+            )
+            ctx.restoreGState()
+        }
+
+        if isResizingSidebar || dividerHovered {
+            ctx.setFillColor(ReaderTheme.chromeAccent
+                .withAlphaComponent(isResizingSidebar ? 0.70 : 0.45).cgColor)
+            ctx.fill(CGRect(x: sRect.minX, y: 0, width: 3, height: sRect.height))
+        } else {
+            ctx.setFillColor(ReaderTheme.sidebarDivider.cgColor)
+            ctx.fill(CGRect(x: sRect.minX, y: 0, width: 1, height: sRect.height))
+        }
+
+        if let store, pdfView?.document != nil, store.annotations.isEmpty {
+            drawEmptySidebarHint(in: sRect)
+        }
+
+        ctx.restoreGState()
+    }
+
+    private func drawSourceHighlights(in ctx: CGContext, dirtyRect: CGRect, anyHovered: Bool) {
         let pdfArea = pdfPanelRect
         guard pdfArea.intersects(dirtyRect) else { return }
         ctx.saveGState()
@@ -877,46 +1103,66 @@ final class SelectionOverlay: NSView {
                 guard sourceRect.intersects(pdfArea),
                       sourceRect.insetBy(dx: -4, dy: -4).intersects(dirtyRect) else { continue }
                 let isHovered = view === hovered
-                let color: NSColor = view.isFailed ? .systemRed : Self.accent
+                let failed = view.isFailed
+                let color: NSColor = failed ? ReaderTheme.inkError : ReaderTheme.inkAccent
+                let fill: NSColor
+                let stroke: NSColor
+                if failed {
+                    fill = ReaderTheme.errorFill
+                    stroke = isHovered ? ReaderTheme.errorStrokeHover
+                        : anyHovered ? ReaderTheme.errorStroke.withAlphaComponent(0.30)
+                        : ReaderTheme.errorStroke
+                } else {
+                    fill = isHovered ? ReaderTheme.sourceFillHover : ReaderTheme.sourceFill
+                    stroke = isHovered ? ReaderTheme.sourceStrokeHover
+                        : anyHovered ? ReaderTheme.sourceDimmedStroke
+                        : ReaderTheme.sourceStroke
+                }
 
                 ctx.saveGState()
                 let rounded = CGPath(roundedRect: sourceRect,
                                      cornerWidth: min(3, sourceRect.width * 0.25),
                                      cornerHeight: min(3, sourceRect.height * 0.25),
                                      transform: nil)
-                ctx.setFillColor(color.withAlphaComponent(isHovered ? 0.12 : 0.055).cgColor)
+                if isHovered {
+                    ctx.saveGState()
+                    ctx.setShadow(offset: .zero, blur: 6,
+                                  color: color.withAlphaComponent(0.32).cgColor)
+                    ctx.setStrokeColor(color.withAlphaComponent(0.55).cgColor)
+                    ctx.setLineWidth(2.4)
+                    ctx.addPath(rounded)
+                    ctx.strokePath()
+                    ctx.restoreGState()
+                }
+                ctx.setFillColor(fill.cgColor)
                 ctx.addPath(rounded)
                 ctx.fillPath()
-                ctx.setStrokeColor(color.withAlphaComponent(isHovered ? 0.92 : 0.48).cgColor)
-                ctx.setLineWidth(isHovered ? 1.75 : 1.1)
+                ctx.setStrokeColor(stroke.cgColor)
+                ctx.setLineWidth(isHovered ? 1.6 : 1.1)
                 ctx.addPath(rounded)
                 ctx.strokePath()
+
+                // The port stays visible even when dense layouts hide the full leader lines.
+                let dotRadius = isHovered
+                    ? ConnectorStyle.sourceAnchorHoverRadius
+                    : ConnectorStyle.sourceAnchorRadius
+                let dot = CGPoint(x: sourceRect.maxX, y: sourceRect.midY)
+                ctx.setFillColor(color.withAlphaComponent(isHovered ? 0.95 : 0.55).cgColor)
+                ctx.fillEllipse(in: CGRect(x: dot.x - dotRadius, y: dot.y - dotRadius,
+                                           width: dotRadius * 2, height: dotRadius * 2))
                 ctx.restoreGState()
             }
         }
 
-        drawSelectionRubberBand()
-        drawPendingConfirm()
         ctx.restoreGState()
     }
 
-    private func drawSidebarBackdrop(in ctx: CGContext, dirtyRect: CGRect) {
-        let sRect = sidebarRect
-        guard sRect.intersects(dirtyRect) else { return }
-
+    private func drawSelectionChrome() {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         ctx.saveGState()
-        ctx.clip(to: sRect)
-
-        // Panel backdrop and left divider.
-        ctx.setFillColor(NSColor.controlBackgroundColor.cgColor)
-        ctx.fill(sRect)
-        ctx.setFillColor(NSColor.separatorColor.cgColor)
-        ctx.fill(CGRect(x: sRect.minX, y: 0, width: 1, height: sRect.height))
-
-        if let store, pdfView?.document != nil, store.annotations.isEmpty {
-            drawEmptySidebarHint(in: sRect)
-        }
-
+        ctx.clip(to: pdfPanelRect)
+        drawSelectionRubberBand()
+        drawPendingConfirm()
         ctx.restoreGState()
     }
 
@@ -935,8 +1181,9 @@ final class SelectionOverlay: NSView {
             let cardRect = view.bounds
             guard !cardRect.isEmpty,
                   cardRect.intersects(sRect),
-                  cardRect.insetBy(dx: -8, dy: -8).intersects(dirtyRect) else { continue }
-            drawCard(view, in: cardRect, isHovered: view === hovered, phase: phase, context: ctx)
+                  cardRect.insetBy(dx: -10, dy: -10).intersects(dirtyRect) else { continue }
+            drawCard(view, in: cardRect, isHovered: view === hovered,
+                     isDimmed: hovered != nil && view !== hovered, phase: phase, context: ctx)
         }
 
         ctx.restoreGState()
@@ -953,9 +1200,23 @@ final class SelectionOverlay: NSView {
             .paragraphStyle: paragraph
         ])
         let size = attr.size()
+        let cardWidth = min(max(size.width + 44, 220), max(sRect.width - 24, 100))
+        let cardHeight = max(size.height + 44, 116)
+        let placeholder = CGRect(
+            x: sRect.midX - cardWidth / 2,
+            y: sRect.midY - cardHeight / 2,
+            width: cardWidth,
+            height: cardHeight
+        )
+        let path = NSBezierPath(roundedRect: placeholder.insetBy(dx: 0.5, dy: 0.5),
+                                xRadius: 12, yRadius: 12)
+        path.lineWidth = 1
+        path.setLineDash([4, 4], count: 2, phase: 0)
+        ReaderTheme.hintBorder.setStroke()
+        path.stroke()
         let drawRect = CGRect(
-            x: sRect.midX - size.width / 2,
-            y: sRect.midY - size.height / 2,
+            x: placeholder.midX - size.width / 2,
+            y: placeholder.midY - size.height / 2,
             width: size.width,
             height: size.height
         )
@@ -963,21 +1224,24 @@ final class SelectionOverlay: NSView {
     }
 
     private func drawCard(_ view: TranslationAnnotation, in cardRect: CGRect, isHovered: Bool,
-                          phase: TimeInterval, context ctx: CGContext) {
+                          isDimmed: Bool, phase: TimeInterval, context ctx: CGContext) {
         ctx.saveGState()
         let cornerRadius = min(SidebarCardStyle.cornerRadius,
                                min(cardRect.width, cardRect.height) * 0.35)
         let cardPath = CGPath(roundedRect: cardRect, cornerWidth: cornerRadius,
                               cornerHeight: cornerRadius, transform: nil)
 
-        let rule: NSColor = view.isFailed ? .systemRed : Self.accent
-        let tint: NSColor
-        if view.isFailed {
-            tint = NSColor(calibratedRed: 1, green: 0.955, blue: 0.95, alpha: 1)
-        } else if isHovered {
-            tint = NSColor(calibratedRed: 0.93, green: 0.955, blue: 1, alpha: 1)
-        } else {
-            tint = NSColor(calibratedRed: 0.985, green: 0.99, blue: 1, alpha: 1)
+        let rule: NSColor = view.isFailed ? ReaderTheme.inkError : ReaderTheme.inkAccent
+
+        if isHovered {
+            // Outer glow lives on the sidebar chrome; the card itself stays paper-white.
+            ctx.saveGState()
+            ctx.setShadow(offset: .zero, blur: 10, color: ReaderTheme.cardHoverGlow.cgColor)
+            ctx.setStrokeColor(ReaderTheme.chromeAccent.withAlphaComponent(0.62).cgColor)
+            ctx.setLineWidth(2)
+            ctx.addPath(cardPath)
+            ctx.strokePath()
+            ctx.restoreGState()
         }
 
         // Soft floating card shadow.
@@ -985,9 +1249,9 @@ final class SelectionOverlay: NSView {
         ctx.setShadow(
             offset: CGSize(width: 0, height: isHovered ? 3 : 2),
             blur: isHovered ? 12 : 8,
-            color: NSColor.black.withAlphaComponent(isHovered ? 0.16 : 0.10).cgColor
+            color: ReaderTheme.cardShadow.cgColor
         )
-        ctx.setFillColor(tint.cgColor)
+        ctx.setFillColor(ReaderTheme.cardPaper.cgColor)
         ctx.addPath(cardPath)
         ctx.fillPath()
         ctx.restoreGState()
@@ -1013,70 +1277,24 @@ final class SelectionOverlay: NSView {
                     in: contentRect, context: ctx, yDown: true, scale: textScale)
             }
         case .failed:
-            TranslationAnnotation.drawText(view.displayText, color: .systemRed,
+            TranslationAnnotation.drawText(view.displayText, color: ReaderTheme.inkError,
                 in: contentRect, context: ctx, yDown: true, scale: textScale)
         }
 
         // Inset accent capsule: lighter and more refined than a full-height stripe.
         let accentBar = SidebarCardStyle.accentBar(in: cardRect)
         let accentRadius = accentBar.width * 0.5
-        ctx.setFillColor(rule.withAlphaComponent(isHovered ? 0.95 : 0.6).cgColor)
+        ctx.setFillColor(rule.withAlphaComponent(isHovered ? 0.98 : isDimmed ? 0.42 : 0.65).cgColor)
         ctx.addPath(CGPath(roundedRect: accentBar, cornerWidth: accentRadius,
                            cornerHeight: accentRadius, transform: nil))
         ctx.fillPath()
         ctx.restoreGState()
 
         // Card border.
-        ctx.setStrokeColor(rule.withAlphaComponent(isHovered ? 0.8 : 0.26).cgColor)
-        ctx.setLineWidth(isHovered ? 1.3 : 0.9)
+        ctx.setStrokeColor(rule.withAlphaComponent(isHovered ? 0.85 : isDimmed ? 0.12 : 0.22).cgColor)
+        ctx.setLineWidth(isHovered ? 1.25 : 0.8)
         ctx.addPath(cardPath)
         ctx.strokePath()
-        ctx.restoreGState()
-    }
-
-    private func drawConnectors(in ctx: CGContext, onlyHovered: Bool) {
-        guard let store, pdfView?.document != nil, !store.annotations.isEmpty else { return }
-        if onlyHovered, hovered == nil { return }
-        let sRect = sidebarRect
-        let visibleVertical = bounds.insetBy(dx: 0, dy: -80)
-
-        let ordered = store.annotations.compactMap { store.view(for: $0.id) }
-        let viewsToPaint = ordered.filter { ($0 === hovered) == onlyHovered }
-        guard !viewsToPaint.isEmpty else { return }
-
-        ctx.saveGState()
-        for view in viewsToPaint {
-            guard !view.bounds.isEmpty,
-                  let sourceRect = sourceRect(for: view.model) else { continue }
-            let cardRect = view.bounds
-            guard sourceRect.maxY >= visibleVertical.minY, sourceRect.minY <= visibleVertical.maxY,
-                  cardRect.maxY >= visibleVertical.minY, cardRect.minY <= visibleVertical.maxY else { continue }
-
-            let isHovered = view === hovered
-            let color: NSColor = view.isFailed ? .systemRed : Self.accent
-            let alpha: CGFloat = isHovered ? 0.92 : 0.42
-            let connector = CardConnector(
-                sourceRect: sourceRect,
-                cardRect: cardRect,
-                minSourceX: 6,
-                maxSourceX: max(sRect.minX - 6, 6)
-            )
-
-            ctx.saveGState()
-            ctx.setStrokeColor(color.withAlphaComponent(alpha).cgColor)
-            ctx.setLineWidth(isHovered ? 1.8 : 1.15)
-            connector.addPath(to: ctx)
-            ctx.strokePath()
-
-            // Anchor endpoints on the source box and on the sidebar card.
-            let dotRadius: CGFloat = isHovered ? 3.2 : 2.2
-            ctx.setFillColor(color.withAlphaComponent(min(alpha + 0.15, 1.0)).cgColor)
-            ctx.fillEllipse(in: CGRect(x: connector.start.x - dotRadius, y: connector.start.y - dotRadius,
-                                       width: dotRadius * 2, height: dotRadius * 2))
-            ctx.fillEllipse(in: CGRect(x: connector.end.x - dotRadius, y: connector.end.y - dotRadius,
-                                       width: dotRadius * 2, height: dotRadius * 2))
-            ctx.restoreGState()
-        }
         ctx.restoreGState()
     }
 
@@ -1085,46 +1303,50 @@ final class SelectionOverlay: NSView {
               let sel = overlayRect(original: pendingRect, page: pendingPage) else { return }
         NSGraphicsContext.current?.saveGraphicsState()
         defer { NSGraphicsContext.current?.restoreGraphicsState() }
-        Self.accent.withAlphaComponent(0.08).setFill()
+        ReaderTheme.selectionFill.setFill()
         sel.fill()
-        Self.accent.setStroke()
-        let selPath = NSBezierPath(rect: sel)
+        ReaderTheme.selectionStroke.setStroke()
+        let selPath = NSBezierPath(roundedRect: sel, xRadius: 2, yRadius: 2)
         selPath.lineWidth = 1
         selPath.setLineDash([4, 3], count: 2, phase: 0)
         selPath.stroke()
 
         for (_, point) in pendingHandlePoints() {
-            let handle = NSBezierPath(roundedRect: CGRect(x: point.x - 3.5, y: point.y - 3.5,
-                                                         width: 7, height: 7), xRadius: 1.5, yRadius: 1.5)
-            NSColor.white.setFill()
+            let handle = NSBezierPath(ovalIn: CGRect(x: point.x - 3.75, y: point.y - 3.75,
+                                                     width: 7.5, height: 7.5))
+            ReaderTheme.handleFill.setFill()
             handle.fill()
-            Self.accent.setStroke()
-            handle.lineWidth = 1
+            ReaderTheme.selectionStroke.setStroke()
+            handle.lineWidth = 1.2
             handle.stroke()
         }
         guard let chip = chipRects() else { return }
 
         let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.25)
-        shadow.shadowBlurRadius = 8
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.22)
+        shadow.shadowBlurRadius = 10
         shadow.shadowOffset = NSSize(width: 0, height: -2)
         NSGraphicsContext.current?.saveGraphicsState()
         shadow.set()
-        let chipPath = NSBezierPath(roundedRect: chip.frame, xRadius: 8, yRadius: 8)
-        NSColor.windowBackgroundColor.setFill()
+        let chipPath = NSBezierPath(roundedRect: chip.frame, xRadius: 9, yRadius: 9)
+        ReaderTheme.chipSurface.setFill()
         chipPath.fill()
         NSGraphicsContext.current?.restoreGraphicsState()
-        NSColor.separatorColor.setStroke()
+        ReaderTheme.chipBorder.setStroke()
         chipPath.lineWidth = 0.5
         chipPath.stroke()
 
-        let confirmPath = NSBezierPath(roundedRect: chip.confirm, xRadius: 5, yRadius: 5)
-        let confirmColor = NSColor.controlAccentColor
-        (hoveredChipButton == 0 ? confirmColor.blended(withFraction: 0.15, of: .black) ?? confirmColor : confirmColor).setFill()
+        let confirmPath = NSBezierPath(roundedRect: chip.confirm, xRadius: 6, yRadius: 6)
+        // Keep the filled button dark enough for its white label in both appearances;
+        // the brighter chrome accent is reserved for thin strokes and glows.
+        let confirmColor = hoveredChipButton == 0
+            ? ReaderTheme.inkAccentStrong
+            : ReaderTheme.inkAccent
+        confirmColor.setFill()
         confirmPath.fill()
         if hoveredChipButton == 1 {
             NSColor.labelColor.withAlphaComponent(0.08).setFill()
-            NSBezierPath(roundedRect: chip.cancel, xRadius: 5, yRadius: 5).fill()
+            NSBezierPath(roundedRect: chip.cancel, xRadius: 6, yRadius: 6).fill()
         }
         drawChipLabel("翻译 ↩", color: .white, in: chip.confirm)
         drawChipLabel("取消", color: .secondaryLabelColor, in: chip.cancel)
@@ -1144,10 +1366,10 @@ final class SelectionOverlay: NSView {
 
     private func drawDropHighlight() {
         let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 6, dy: 6), xRadius: 10, yRadius: 10)
-        NSColor.controlAccentColor.withAlphaComponent(0.08).setFill()
+        ReaderTheme.chromeAccent.withAlphaComponent(0.07).setFill()
         path.fill()
-        NSColor.controlAccentColor.setStroke()
-        path.lineWidth = 3
+        ReaderTheme.chromeAccent.withAlphaComponent(0.85).setStroke()
+        path.lineWidth = 2.5
         path.stroke()
     }
 
@@ -1169,7 +1391,7 @@ final class SelectionOverlay: NSView {
             let bar = CGRect(x: rect.minX + inset.x, y: y, width: available * fraction, height: lineHeight)
             // Each bar pulses slightly out of step, so the block reads as "flowing in".
             let wave = 0.5 + 0.5 * sin(phase * 3.2 - Double(i) * 0.6)
-            ctx.setFillColor(Self.accent.withAlphaComponent(0.10 + 0.10 * wave).cgColor)
+            ctx.setFillColor(ReaderTheme.skeleton.withAlphaComponent(0.10 + 0.10 * wave).cgColor)
             let radius = min(lineHeight, bar.width) / 2
             ctx.addPath(CGPath(roundedRect: bar, cornerWidth: radius, cornerHeight: radius, transform: nil))
             ctx.fillPath()
@@ -1182,10 +1404,10 @@ final class SelectionOverlay: NSView {
     private func drawSelectionRubberBand() {
         guard let page = anchorPage, !selectionPageRect.isNull,
               let rect = overlayRect(original: selectionPageRect, page: page) else { return }
-        Self.accent.withAlphaComponent(0.15).setFill()
+        ReaderTheme.selectionFill.setFill()
         rect.fill()
-        Self.accent.setStroke()
-        let border = NSBezierPath(rect: rect)
+        ReaderTheme.selectionStroke.setStroke()
+        let border = NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2)
         border.lineWidth = 1
         border.stroke()
     }

@@ -115,6 +115,11 @@ enum PDFExporter {
                     guard let overlay = byID[placed.id] else { continue }
                     drawCard(overlay, in: placed.frame, context: context)
                 }
+                for placed in layout.cards {
+                    guard let overlay = byID[placed.id] else { continue }
+                    drawConnectorEndpoints(sourceRect: overlay.model.rect, cardRect: placed.frame,
+                                           pageBox: pageBox, in: context)
+                }
             }
             context.endPDFPage()
             progress?(index + 1, pageCount)
@@ -134,9 +139,9 @@ enum PDFExporter {
             height: exportBox.height
         )
         context.saveGState()
-        context.setFillColor(CGColor(red: 0.97, green: 0.975, blue: 0.985, alpha: 1))
+        context.setFillColor(ReaderTheme.printSidebar.cgColor)
         context.fill(sidebarRect)
-        context.setFillColor(CGColor(gray: 0.85, alpha: 1))
+        context.setFillColor(ReaderTheme.printDivider.cgColor)
         context.fill(CGRect(x: pageBox.maxX, y: exportBox.minY, width: 0.75, height: exportBox.height))
         context.restoreGState()
     }
@@ -149,10 +154,10 @@ enum PDFExporter {
             cornerHeight: min(3, rect.height * 0.25),
             transform: nil
         )
-        context.setFillColor(CGColor(red: 0.2, green: 0.45, blue: 0.95, alpha: 0.06))
+        context.setFillColor(ReaderTheme.sourceFill.cgColor)
         context.addPath(path)
         context.fillPath()
-        context.setStrokeColor(CGColor(red: 0.2, green: 0.45, blue: 0.95, alpha: 0.48))
+        context.setStrokeColor(ReaderTheme.sourceStroke.cgColor)
         context.setLineWidth(1.0)
         context.addPath(path)
         context.strokePath()
@@ -167,17 +172,29 @@ enum PDFExporter {
             maxSourceX: pageBox.maxX - 4
         )
         context.saveGState()
-        context.setStrokeColor(CGColor(red: 0.2, green: 0.45, blue: 0.95, alpha: 0.45))
-        context.setLineWidth(1.1)
+        context.setStrokeColor(ReaderTheme.printConnector.cgColor)
+        context.setLineWidth(1.0)
+        context.setLineCap(.round)
         connector.addPath(to: context)
         context.strokePath()
+        context.restoreGState()
+    }
 
-        let dotRadius: CGFloat = 2.0
-        context.setFillColor(CGColor(red: 0.2, green: 0.45, blue: 0.95, alpha: 0.6))
-        context.fillEllipse(in: CGRect(x: connector.start.x - dotRadius, y: connector.start.y - dotRadius,
-                                       width: dotRadius * 2, height: dotRadius * 2))
-        context.fillEllipse(in: CGRect(x: connector.end.x - dotRadius, y: connector.end.y - dotRadius,
-                                       width: dotRadius * 2, height: dotRadius * 2))
+    private static func drawConnectorEndpoints(sourceRect: CGRect, cardRect: CGRect,
+                                               pageBox: CGRect, in context: CGContext) {
+        let connector = CardConnector(
+            sourceRect: sourceRect,
+            cardRect: cardRect,
+            minSourceX: pageBox.minX + 4,
+            maxSourceX: pageBox.maxX - 4
+        )
+        let radius: CGFloat = 1.8
+        context.saveGState()
+        context.setFillColor(ReaderTheme.inkAccent.withAlphaComponent(0.62).cgColor)
+        for point in [connector.start, connector.end] {
+            context.fillEllipse(in: CGRect(x: point.x - radius, y: point.y - radius,
+                                           width: radius * 2, height: radius * 2))
+        }
         context.restoreGState()
     }
 
@@ -186,7 +203,7 @@ enum PDFExporter {
         let radius = min(SidebarCardStyle.cornerRadius,
                          min(cardRect.width, cardRect.height) * 0.35)
         let cardPath = CGPath(roundedRect: cardRect, cornerWidth: radius, cornerHeight: radius, transform: nil)
-        context.setFillColor(CGColor(red: 0.985, green: 0.99, blue: 1, alpha: 1))
+        context.setFillColor(ReaderTheme.cardPaper.cgColor)
         context.addPath(cardPath)
         context.fillPath()
 
@@ -194,8 +211,8 @@ enum PDFExporter {
         ctxClipAndDrawContent(overlay, cardRect: cardRect, cardPath: cardPath, context: context)
         context.restoreGState()
 
-        context.setStrokeColor(CGColor(red: 0.2, green: 0.45, blue: 0.95, alpha: 0.26))
-        context.setLineWidth(0.9)
+        context.setStrokeColor(ReaderTheme.printCardBorder.cgColor)
+        context.setLineWidth(0.8)
         context.addPath(cardPath)
         context.strokePath()
         context.restoreGState()
@@ -224,7 +241,7 @@ enum PDFExporter {
         }
         let accentBar = SidebarCardStyle.accentBar(in: cardRect)
         let accentRadius = accentBar.width * 0.5
-        context.setFillColor(CGColor(red: 0.2, green: 0.45, blue: 0.95, alpha: 0.6))
+        context.setFillColor(ReaderTheme.inkAccent.withAlphaComponent(0.65).cgColor)
         context.addPath(CGPath(roundedRect: accentBar, cornerWidth: accentRadius,
                                cornerHeight: accentRadius, transform: nil))
         context.fillPath()

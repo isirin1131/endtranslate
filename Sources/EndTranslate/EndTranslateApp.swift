@@ -10,12 +10,14 @@ struct EndTranslateApp: App {
         Window("EndTranslate", id: "main") {
             ContentView()
                 .frame(minWidth: 720, minHeight: 520)
+                .tint(Color(nsColor: ReaderTheme.chromeAccent))
         }
         .defaultSize(width: 1100, height: 850)
         .commands { AppCommands() }
 
         Settings {
             SettingsView(settings: AppSettings.shared)
+                .tint(Color(nsColor: ReaderTheme.chromeAccent))
         }
     }
 }
