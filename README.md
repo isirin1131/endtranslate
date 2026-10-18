@@ -12,6 +12,10 @@ A native macOS PDF reader with inline translation, LaTeX math rendering, and ann
 
 ![EndTranslate 阅读界面：左侧合成原文与高亮框，右侧译文卡片中的复杂公式](docs/images/reader-demo.png)
 
+密集场景下，侧边栏会把短标签自动排成多列 Bento 网格，图注独占整行；静止状态隐藏长连线，只在原文框保留锚点，避免十几条引线互相覆盖。悬停任一侧时再显示当前配对。
+
+![密集场景：短标签排成多列网格，图注占满整行，静止时不绘制长引线](docs/images/dense-demo.png)
+
 ![译文卡片细节：高斯密度、期望与方差、协方差矩阵和行列式](docs/images/formula-demo.png)
 
 ## 环境
