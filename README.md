@@ -16,7 +16,7 @@ A native macOS PDF reader with inline translation, LaTeX math rendering, and ann
 
 ![密集场景：短标签排成多列网格，图注占满整行，静止时不绘制长引线](docs/images/dense-demo.png)
 
-![译文卡片细节：高斯密度、期望与方差、协方差矩阵和行列式](docs/images/formula-demo.png)
+![密集场景悬停：输出 logits 的原文框与卡片成对高亮，只显示当前配对的一条引线](docs/images/dense-hover-demo.png)
 
 ## 环境
 
