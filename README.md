@@ -6,6 +6,14 @@ A native macOS PDF reader with inline translation, LaTeX math rendering, and ann
 
 当前版本 **1.3.0**。可从 [GitHub Releases](https://github.com/isirin1131/endtranslate/releases/latest) 下载 Apple Silicon 版应用；Intel Mac 请从源码构建。下载包采用本地签名，尚未经过 Apple 公证。
 
+## 效果预览
+
+左侧是专门撰写的合成演示 PDF，不包含任何论文、书籍或网页原文；右侧译文卡片由内置 WebKit + MathJax 排版，分式、根号、矩阵、希腊字母和表格在放大阅读及导出 PDF 时都保持矢量清晰。
+
+![EndTranslate 阅读界面：左侧合成原文与高亮框，右侧译文卡片中的复杂公式](docs/images/reader-demo.png)
+
+![译文卡片细节：高斯密度、期望与方差、协方差矩阵和行列式](docs/images/formula-demo.png)
+
 ## 环境
 
 - macOS 14 或更新版本。
