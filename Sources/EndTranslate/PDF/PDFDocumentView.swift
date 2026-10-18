@@ -74,6 +74,9 @@ struct PDFDocumentView: NSViewRepresentable {
         overlay.onOpenFile = { [weak model] url in
             model?.open(url: url)
         }
+        overlay.onAnnotationBecameVisible = { [weak model] annotation in
+            model?.ensureRendered(annotation)
+        }
         overlay.onViewportChange = { [weak model] in
             model?.viewportDidChange()
         }

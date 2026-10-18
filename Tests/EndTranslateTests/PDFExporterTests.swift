@@ -46,46 +46,47 @@ final class PDFExporterTests {
         return note
     }
 
-    private func export(_ notes: [TranslationAnnotation], source: PDFDocument? = nil) throws -> PDFDocument {
+    private func export(_ notes: [TranslationAnnotation], source: PDFDocument? = nil) async throws -> PDFDocument {
         let url = directory.appendingPathComponent("\(UUID().uuidString).pdf")
         let source = source ?? PDFDocument(data: pdf(["ORIGINAL_CONTENT"]))!
-        try PDFExporter.export(document: source, overlays: notes, to: url)
+        try await PDFExporter.export(document: source, overlays: notes, to: url)
         return try #require(PDFDocument(url: url))
     }
 
     // PDFKit may extract underscores as separate runs; use whole words as text sentinels.
-    @Test func plainTextFallbackIsIncludedInExport() throws {
+    @Test func plainTextFallbackIsIncludedInExport() async throws {
         let note = annotation("中文译文 FALLBACKTRANSLATION")
         note.fallbackText = note.model.translationMd
-        let output = try export([note])
+        let output = try await export([note])
         let text = try #require(output.string)
         #expect(text.contains("ORIGINAL_CONTENT"))
         #expect(text.contains("FALLBACKTRANSLATION"))
         #expect(text.contains("中文译文"))
     }
 
-    @Test func translationWaitingForRenderingCanExportAsPlainText() throws {
+    @Test func translationWaitingForRenderingCanExportAsPlainText() async throws {
         let note = annotation("**RENDERNOTREADY**")
         #expect(note.rendered == nil)
         #expect(note.fallbackText == nil)
-        let text = try #require(export([note]).string)
+        let output = try await export([note])
+        let text = try #require(output.string)
         #expect(text.contains("RENDERNOTREADY"))
         #expect(!text.contains("**"))
     }
 
-    @Test func vectorTranslationAndOriginalContentArePreserved() throws {
+    @Test func vectorTranslationAndOriginalContentArePreserved() async throws {
         let note = annotation("VECTOR_TRANSLATION")
         note.rendered = RenderedTranslation(
             pdfData: pdf(["VECTOR_TRANSLATION"], box: CGRect(x: 0, y: 0, width: 300, height: 75))
         )
-        let output = try export([note])
+        let output = try await export([note])
         let text = try #require(output.string)
         #expect(text.contains("ORIGINAL_CONTENT"))
         #expect(text.contains("VECTOR_TRANSLATION"))
         #expect(output.page(at: 0)?.bounds(for: .mediaBox) == CGRect(x: 0, y: 0, width: 400 + PDFExporter.sidebarWidth, height: 500))
     }
 
-    @Test func unfinishedAnnotationsAreNotExported() throws {
+    @Test func unfinishedAnnotationsAreNotExported() async throws {
         let loading = annotation("LOADINGTRANSLATION")
         loading.status = .loading
         // A retry can still have a previous rendered result attached.
@@ -94,7 +95,7 @@ final class PDFExporterTests {
         )
         let failed = annotation("FAILEDTRANSLATION")
         failed.status = .failed("请求超时")
-        let output = try export([loading, failed])
+        let output = try await export([loading, failed])
         let text = try #require(output.string)
         #expect(text.contains("ORIGINAL_CONTENT"))
         // Pages without completed annotations keep their original mediaBox width.
@@ -104,9 +105,9 @@ final class PDFExporterTests {
         }
     }
 
-    @Test func annotationsStayOnTheirAssignedPages() throws {
+    @Test func annotationsStayOnTheirAssignedPages() async throws {
         let source = PDFDocument(data: pdf(["PAGE_ONE", "PAGE_TWO"]))!
-        let output = try export([annotation("SECONDPAGETRANSLATION", page: 1)], source: source)
+        let output = try await export([annotation("SECONDPAGETRANSLATION", page: 1)], source: source)
         #expect(output.pageCount == 2)
         #expect(output.page(at: 0)?.bounds(for: .mediaBox).width == 400)
         #expect(output.page(at: 1)?.bounds(for: .mediaBox).width == 400 + PDFExporter.sidebarWidth)
@@ -114,13 +115,13 @@ final class PDFExporterTests {
         #expect(output.page(at: 1)!.string!.contains("SECONDPAGETRANSLATION"))
     }
 
-    @Test func sideBySideCardsExportIntoRightSidebarWithoutSlicingOriginalPage() throws {
+    @Test func sideBySideCardsExportIntoRightSidebarWithoutSlicingOriginalPage() async throws {
         let source = PDFDocument(data: pdf(["ORIGINAL_CONTENT"]))!
         let left = annotation("LEFTCARDTRANSLATION")
         left.model.rect = CGRect(x: 20, y: 300, width: 160, height: 50)
         let right = annotation("RIGHTCARDTRANSLATION")
         right.model.rect = CGRect(x: 210, y: 300, width: 160, height: 50)
-        let output = try export([right, left], source: source)
+        let output = try await export([right, left], source: source)
         let pageBox = try #require(output.page(at: 0)?.bounds(for: .mediaBox))
         #expect(pageBox.width == 400 + PDFExporter.sidebarWidth)
         #expect(pageBox.height == 500)
@@ -135,7 +136,7 @@ final class PDFExporterTests {
         #expect(text.contains("RIGHTCARDTRANSLATION"))
     }
 
-    @Test func denseCardsExportInsideTheOriginalPageHeight() throws {
+    @Test func denseCardsExportInsideTheOriginalPageHeight() async throws {
         let notes = (0..<16).map { index -> TranslationAnnotation in
             let note = annotation("DENSECARD\(index)")
             note.model.rect = CGRect(
@@ -146,7 +147,7 @@ final class PDFExporterTests {
             )
             return note
         }
-        let output = try export(notes)
+        let output = try await export(notes)
         let pageBox = try #require(output.page(at: 0)?.bounds(for: .mediaBox))
         #expect(pageBox == CGRect(x: 0, y: 0, width: 400 + PDFExporter.sidebarWidth, height: 500))
         let top = 500 - CardSidebarLayout.pageVerticalInset
@@ -161,6 +162,47 @@ final class PDFExporterTests {
             for j in (i + 1)..<notes.count {
                 #expect(!notes[i].bounds.intersects(notes[j].bounds))
             }
+        }
+    }
+
+    @Test @MainActor func exportReportsPageProgress() async throws {
+        let source = PDFDocument(data: pdf(["PAGE_ONE", "PAGE_TWO", "PAGE_THREE"]))!
+        let url = directory.appendingPathComponent("\(UUID().uuidString).pdf")
+        var completed: [Int] = []
+        var totals: [Int] = []
+        try await PDFExporter.export(
+            document: source,
+            overlays: [],
+            to: url,
+            progress: { done, total in
+                completed.append(done)
+                totals.append(total)
+            }
+        )
+        #expect(completed == [1, 2, 3])
+        #expect(totals == [3, 3, 3])
+        #expect(PDFDocument(url: url)?.pageCount == 3)
+    }
+
+    @Test @MainActor func exportCanBeCancelledBetweenPages() async throws {
+        let source = PDFDocument(data: pdf(["PAGE_ONE", "PAGE_TWO"]))!
+        let url = directory.appendingPathComponent("\(UUID().uuidString).pdf")
+        var exportedPages = 0
+        var cancel = false
+        do {
+            try await PDFExporter.export(
+                document: source,
+                overlays: [],
+                to: url,
+                progress: { _, _ in
+                    exportedPages += 1
+                    cancel = true
+                },
+                isCancelled: { cancel }
+            )
+            Issue.record("expected CancellationError")
+        } catch is CancellationError {
+            #expect(exportedPages == 1)
         }
     }
 }

@@ -23,6 +23,10 @@ struct ContentView: View {
             .sheet(item: $model.editing) { session in
                 AnnotationEditorView(session: session, model: model)
             }
+            .sheet(isPresented: exportSheetPresented) {
+                ExportProgressView(model: model)
+                    .interactiveDismissDisabled()
+            }
             .background(WindowSaveGuard(model: model))
             .focusedSceneObject(model)
             .onAppear {
@@ -53,6 +57,15 @@ struct ContentView: View {
                 StatusPill(model: model)
                     .padding(.bottom, 18)
             }
+    }
+
+    private var exportSheetPresented: Binding<Bool> {
+        Binding(
+            get: { model.isExporting },
+            set: { isPresented in
+                if !isPresented { model.cancelExport() }
+            }
+        )
     }
 
     @ToolbarContentBuilder
@@ -90,7 +103,7 @@ struct ContentView: View {
                 Label("导出", systemImage: "square.and.arrow.up")
             }
             .help("导出带译文的 PDF（⇧⌘E）")
-            .disabled(model.document == nil)
+            .disabled(model.document == nil || model.isExporting)
 
             SettingsLink {
                 Label("设置", systemImage: "gearshape")
@@ -226,6 +239,33 @@ private struct RecentRow: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(url.path)
+    }
+}
+
+/// Modal progress while the annotated PDF is prepared and written.
+private struct ExportProgressView: View {
+    @ObservedObject var model: PDFViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "square.and.arrow.up")
+                    .foregroundStyle(.secondary)
+                Text(model.exportPhase.isEmpty ? "正在导出…" : model.exportPhase)
+                    .font(.headline)
+            }
+            ProgressView(value: min(max(model.exportFraction, 0), 1))
+            HStack {
+                Text(model.exportDetail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("取消") { model.cancelExport() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(22)
+        .frame(width: 360)
     }
 }
 

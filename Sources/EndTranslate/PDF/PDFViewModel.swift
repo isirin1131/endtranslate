@@ -26,8 +26,18 @@ final class PDFViewModel: ObservableObject {
     @Published private(set) var recentFiles: [URL] = ReadingHistory.recent()
     @Published private(set) var saveError: String?
     @Published private(set) var isPreparingDocument = false
+    /// Export runs one page at a time; these fields drive the modal progress sheet.
+    @Published private(set) var isExporting = false
+    @Published private(set) var exportPhase = ""
+    @Published private(set) var exportFraction: Double = 0
+    @Published private(set) var exportDetail = ""
     /// Bumped to ask the view layer to open the Settings window.
     @Published var settingsRequest = 0
+
+    private struct TranslationJob {
+        let token: UUID
+        let task: Task<Void, Never>
+    }
 
     let store = AnnotationStore()
     private(set) var fileURL: URL?
@@ -38,6 +48,18 @@ final class PDFViewModel: ObservableObject {
     private var sidebarRenderTask: Task<Void, Never>?
     private var lastRenderedMaxInnerWidth: CGFloat = TranslationAnnotation.defaultRenderWidth
     private var toastTask: Task<Void, Never>?
+    private var exportTask: Task<Void, Never>?
+    private var exportTemporaryURL: URL?
+    /// Translation requests are keyed by annotation so deleting or retranslating a card can
+    /// stop the in-flight request instead of paying for a result nobody will see.
+    private var translationJobs: [UUID: TranslationJob] = [:]
+    private var translationGeneration: UInt64 = 0
+    /// Reference counts by annotation, so an on-demand render and a forced re-render do not
+    /// lose track of one another.
+    private var activeRenders: [UUID: Int] = [:]
+    /// A failed lazy render must not be retried on every frame; an edit or a new translation
+    /// clears this marker.
+    private var lazyRenderAttempted: Set<UUID> = []
     weak var pdfView: PDFView?
     weak var undoManager: UndoManager?
     private var observers: [NSObjectProtocol] = []
@@ -95,6 +117,10 @@ final class PDFViewModel: ObservableObject {
     // MARK: opening
 
     func openPanel() {
+        guard !isExporting else {
+            show("请先等待导出完成或取消导出", isError: true)
+            return
+        }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.pdf]
         panel.allowsMultipleSelection = false
@@ -110,6 +136,10 @@ final class PDFViewModel: ObservableObject {
     }
 
     func open(url: URL) {
+        guard !isExporting else {
+            show("请先等待导出完成或取消导出", isError: true)
+            return
+        }
         let url = url.standardizedFileURL
         if url == fileURL {
             if let persistence, !persistence.isReady, !isPreparingDocument {
@@ -127,6 +157,12 @@ final class PDFViewModel: ObservableObject {
         }
         // Flush the outgoing document before its state is replaced.
         guard flush() else { return }
+        cancelAllTranslations()
+        translationGeneration &+= 1
+        activeTranslations = 0
+        sidebarRenderTask?.cancel()
+        lazyRenderAttempted.removeAll()
+        activeRenders.removeAll()
         editing = nil
         undoManager?.removeAllActions()
         dismissToast()
@@ -167,7 +203,7 @@ final class PDFViewModel: ObservableObject {
                     try SidecarIO.sha256(of: url)
                 }.value
                 guard self.persistence === session else { return }
-                self.restoreAnnotations(session.load(pdfSha256: sha), session: session)
+                self.restoreAnnotations(session.load(pdfSha256: sha))
                 self.isPreparingDocument = false
             } catch {
                 guard self.persistence === session else { return }
@@ -192,7 +228,7 @@ final class PDFViewModel: ObservableObject {
         NSDocumentController.shared.clearRecentDocuments(nil)
     }
 
-    private func restoreAnnotations(_ result: SidecarIO.LoadResult, session: AnnotationPersistence) {
+    private func restoreAnnotations(_ result: SidecarIO.LoadResult) {
         let models: [Annotation]
         switch result {
         case .missing:
@@ -209,32 +245,17 @@ final class PDFViewModel: ObservableObject {
         case .loaded(let loaded):
             models = loaded
         }
-        guard !models.isEmpty else { return }
-        let annotations = models.map { model -> TranslationAnnotation in
+        for model in models {
             let annotation = TranslationAnnotation(model: model)
             // An empty translation was in flight or failed when the app last closed.
             annotation.status = model.translationMd.isEmpty ? .failed("上次未完成") : .done
             annotation.fallbackText = MarkdownText.plainText(model.translationMd)
             store.add(model, view: annotation)
-            return annotation
         }
+        // Typesetting is lazy: only cards in the current viewport are rendered, and export
+        // prepares the rest. Opening a heavily annotated paper therefore does not have to
+        // typeset every old translation before the first frame appears.
         SelectionOverlay.requestInvalidate()
-        Task {
-            for chunk in stride(from: 0, to: annotations.count, by: 4).map({ Array(annotations[$0..<min($0 + 4, annotations.count)]) }) {
-                guard self.persistence === session else { return }
-                await withTaskGroup(of: Void.self) { group in
-                    for annotation in chunk where annotation.status == .done {
-                        group.addTask { @MainActor [weak self] in
-                            guard let self, self.persistence === session,
-                                  self.store.view(for: annotation.model.id) === annotation else { return }
-                            await self.render(annotation, markdown: annotation.model.translationMd)
-                        }
-                    }
-                }
-            }
-            guard self.persistence === session else { return }
-            SelectionOverlay.requestInvalidate()
-        }
     }
 
     // MARK: navigation
@@ -319,6 +340,13 @@ final class PDFViewModel: ObservableObject {
     /// Writes everything pending right now (window closing, app quitting, switching files).
     @discardableResult
     func flush() -> Bool {
+        if isExporting {
+            exportTask?.cancel()
+            if let exportTemporaryURL {
+                try? FileManager.default.removeItem(at: exportTemporaryURL)
+            }
+            exportTemporaryURL = nil
+        }
         saveTask?.cancel()
         positionTask?.cancel()
         savePosition()
@@ -417,7 +445,12 @@ final class PDFViewModel: ObservableObject {
     }
 
     func exportAnnotatedPDF() {
-        guard let fileURL else { return }
+        guard !isExporting, editing == nil, let fileURL else {
+            if editing != nil {
+                show("请先关闭译文编辑窗口", isError: true)
+            }
+            return
+        }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.pdf]
         panel.canCreateDirectories = true
@@ -433,16 +466,87 @@ final class PDFViewModel: ObservableObject {
         }
     }
 
+    func cancelExport() {
+        guard isExporting else { return }
+        exportPhase = "正在取消导出…"
+        exportTask?.cancel()
+    }
+
     private func export(to url: URL) {
-        guard let document else { return }
-        do {
-            try PDFExporter.export(document: document, overlays: store.allViews, to: url)
-            show("已导出 \(url.lastPathComponent)", actionTitle: "在 Finder 中显示") {
-                NSWorkspace.shared.activateFileViewerSelecting([url])
+        guard !isExporting, let document else { return }
+        let overlays = store.allViews.filter { $0.status == .done }
+        let temporaryURL = url.deletingLastPathComponent()
+            .appendingPathComponent(".endtranslate-\(UUID().uuidString).pdf")
+        exportTemporaryURL = temporaryURL
+        isExporting = true
+        exportPhase = overlays.isEmpty ? "正在写入 PDF…" : "正在准备译文…"
+        exportFraction = 0
+        exportDetail = ""
+        exportTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                self.isExporting = false
+                self.exportTask = nil
+                self.exportTemporaryURL = nil
+                // A successful export has already moved the temporary file into place.
+                try? FileManager.default.removeItem(at: temporaryURL)
+                // PDFExporter writes card frames in export coordinates; rebuild the screen
+                // layout on the next overlay pass.
+                SelectionOverlay.requestInvalidate()
             }
-        } catch {
-            show("导出失败：\(error.localizedDescription)", isError: true)
-            Log.write("export failed: \(error)")
+            do {
+                try await self.prepareExport(overlays)
+                try Task.checkCancellation()
+                self.exportPhase = "正在写入 PDF…"
+                let pageBase: Double = overlays.isEmpty ? 0 : 0.3
+                self.exportFraction = pageBase
+                self.exportDetail = ""
+                try await PDFExporter.export(
+                    document: document,
+                    overlays: overlays,
+                    to: temporaryURL,
+                    progress: { [weak self] completed, total in
+                        guard let self else { return }
+                        let fraction = Double(completed) / Double(max(total, 1))
+                        self.exportFraction = pageBase + fraction * (1 - pageBase)
+                        self.exportDetail = "第 \(completed) / \(total) 页"
+                    }
+                )
+                try Task.checkCancellation()
+                try self.commitExport(from: temporaryURL, to: url)
+                self.show("已导出 \(url.lastPathComponent)", actionTitle: "在 Finder 中显示") {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                }
+            } catch is CancellationError {
+                self.show("已取消导出")
+            } catch {
+                self.show("导出失败：\(error.localizedDescription)", isError: true)
+                Log.write("export failed: \(error)")
+            }
+        }
+    }
+
+    /// Typeset every completed translation that is still showing fallback text, so the
+    /// exported PDF keeps vector formulas even when the reader never scrolled to that page.
+    private func prepareExport(_ overlays: [TranslationAnnotation]) async throws {
+        let missing = overlays.filter { $0.rendered == nil && !$0.model.translationMd.isEmpty }
+        guard !missing.isEmpty else { return }
+        exportPhase = "正在排版译文…"
+        for (index, annotation) in missing.enumerated() {
+            try Task.checkCancellation()
+            exportFraction = 0.3 * Double(index) / Double(missing.count)
+            exportDetail = "\(index + 1) / \(missing.count)"
+            lazyRenderAttempted.remove(annotation.model.id)
+            await performRender(annotation, markdown: annotation.model.translationMd)
+        }
+        try Task.checkCancellation()
+    }
+
+    private func commitExport(from temporaryURL: URL, to destinationURL: URL) throws {
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            _ = try FileManager.default.replaceItemAt(destinationURL, withItemAt: temporaryURL)
+        } else {
+            try FileManager.default.moveItem(at: temporaryURL, to: destinationURL)
         }
     }
 
@@ -484,6 +588,7 @@ final class PDFViewModel: ObservableObject {
             settingsRequest += 1
             return
         }
+        cancelTranslation(id: model.id)
         guard let view = pdfView, let source = document?.page(at: model.page),
               let png = SelectionOverlay.capture(page: source, rect: model.rect, scale: 3, box: view.displayBox) else {
             annotation.status = .failed("无法截取选区")
@@ -494,32 +599,64 @@ final class PDFViewModel: ObservableObject {
         SelectionOverlay.requestInvalidate()
         activeTranslations += 1
         Log.write("translate page=\(model.page) rect=\(Int(model.rect.width))x\(Int(model.rect.height))pt png=\(png.count / 1024)KB")
-        let settings = AppSettings.shared
-        Task {
-            defer { activeTranslations -= 1 }
+        let client = LLMClient(settings: AppSettings.shared)
+        let id = model.id
+        let token = UUID()
+        let generation = translationGeneration
+        let task = Task { [weak self, weak annotation] in
+            defer {
+                if let self, self.translationGeneration == generation {
+                    self.activeTranslations -= 1
+                    if self.translationJobs[id]?.token == token {
+                        self.translationJobs[id] = nil
+                    }
+                }
+            }
+            guard let self, let annotation else { return }
             do {
-                let text = try await LLMClient(settings: settings).translate(imagePNG: png)
-                guard store.view(for: model.id) === annotation else { return }
+                let text = try await client.translate(imagePNG: png)
+                try Task.checkCancellation()
+                guard self.store.view(for: id) === annotation else { return }
                 annotation.model.translationMd = text
-                store.update(annotation.model)
-                scheduleSave()
-                await render(annotation, markdown: text)
-                guard store.view(for: model.id) === annotation else { return }
+                self.store.update(annotation.model)
+                self.scheduleSave()
+                self.lazyRenderAttempted.remove(id)
+                await self.performRender(annotation, markdown: text)
+                try Task.checkCancellation()
+                guard self.store.view(for: id) === annotation else { return }
                 annotation.status = .done
                 SelectionOverlay.requestInvalidate()
+            } catch is CancellationError {
+                return
             } catch {
-                guard store.view(for: model.id) === annotation else { return }
+                if Task.isCancelled { return }
+                if let urlError = error as? URLError, urlError.code == .cancelled { return }
+                guard self.store.view(for: id) === annotation else { return }
                 let message = LLMClient.describe(error)
                 annotation.status = .failed(message)
                 SelectionOverlay.requestInvalidate()
-                if let error = error as? LLMClient.LLMError, error.needsSettingsReview {
-                    show("请检查翻译服务设置，修改后点击失败的译文框重试", isError: true,
-                         actionTitle: "打开设置") { [weak self] in
+                if let llmError = error as? LLMClient.LLMError, llmError.needsSettingsReview {
+                    self.show("请检查翻译服务设置，修改后点击失败的译文框重试", isError: true,
+                              actionTitle: "打开设置") { [weak self] in
                         self?.settingsRequest += 1
                     }
                 }
                 Log.write("translation failed (\((error as NSError).domain), \((error as NSError).code))")
             }
+        }
+        translationJobs[id] = TranslationJob(token: token, task: task)
+    }
+
+    private func cancelTranslation(id: UUID) {
+        guard let job = translationJobs.removeValue(forKey: id) else { return }
+        job.task.cancel()
+    }
+
+    private func cancelAllTranslations() {
+        let jobs = Array(translationJobs.values)
+        translationJobs.removeAll()
+        for job in jobs {
+            job.task.cancel()
         }
     }
 
@@ -543,12 +680,15 @@ final class PDFViewModel: ObservableObject {
             guard abs(targetInner - self.lastRenderedMaxInnerWidth) >= 6 else { return }
             self.lastRenderedMaxInnerWidth = targetInner
             let candidates = self.store.allViews.filter {
-                $0.status == .done && TranslationAnnotation.isFullWidthContent($0.model.translationMd)
+                $0.status == .done && $0.rendered != nil
+                    && TranslationAnnotation.isFullWidthContent($0.model.translationMd)
             }
             guard !candidates.isEmpty else { return }
             for annotation in candidates {
                 guard !Task.isCancelled else { return }
-                await self.render(annotation, markdown: annotation.model.translationMd)
+                // A resize may supersede a failed lazy attempt at the old width.
+                self.lazyRenderAttempted.remove(annotation.model.id)
+                await self.performRender(annotation, markdown: annotation.model.translationMd)
             }
             SelectionOverlay.requestInvalidate()
         }
@@ -560,12 +700,21 @@ final class PDFViewModel: ObservableObject {
         let maxInner = currentMaxInnerWidth
         lastRenderedMaxInnerWidth = maxInner
         let width = TranslationAnnotation.preferredRenderWidth(for: markdown, maxInnerWidth: maxInner)
-        let doc = try? await MarkdownRenderer.shared.render(
-            markdown: markdown,
-            width: width,
-            fontSize: TranslationAnnotation.renderFontSize,
-            fitToContent: true
-        )
+        let doc: RenderedTranslation?
+        do {
+            doc = try await MarkdownRenderer.shared.render(
+                markdown: markdown,
+                width: width,
+                fontSize: TranslationAnnotation.renderFontSize,
+                fitToContent: true
+            )
+        } catch is CancellationError {
+            // A sidebar resize or document switch cancelled this job. Keep the previous
+            // vector result instead of downgrading a good card to plain text.
+            return
+        } catch {
+            doc = nil
+        }
         guard store.view(for: annotation.model.id) === annotation,
               annotation.model.translationMd == markdown else { return }
         if let doc {
@@ -575,6 +724,45 @@ final class PDFViewModel: ObservableObject {
             annotation.rendered = nil
             annotation.fallbackText = MarkdownText.plainText(markdown)
         }
+    }
+
+    /// Called by the overlay when a card becomes visible. Restored annotations start with
+    /// plain fallback text; only the ones the reader can actually see are typeset. A failed
+    /// attempt is not repeated on every frame; editing or retranslating clears the marker.
+    func ensureRendered(_ annotation: TranslationAnnotation) {
+        let id = annotation.model.id
+        guard annotation.status == .done,
+              annotation.rendered == nil,
+              !annotation.model.translationMd.isEmpty,
+              store.view(for: id) === annotation,
+              activeRenders[id] == nil,
+              !lazyRenderAttempted.contains(id) else { return }
+        lazyRenderAttempted.insert(id)
+        Task { [weak self, weak annotation] in
+            guard let self, let annotation else { return }
+            await self.performRender(annotation, markdown: annotation.model.translationMd)
+            // If the divider moved while this first render was in flight, re-render at the
+            // new width instead of leaving a width-limited vector in a wider card.
+            self.sidebarWidthDidChange()
+            SelectionOverlay.requestInvalidate()
+        }
+    }
+
+    /// Keeps a reference count per annotation so lazy and forced renders cannot lose track
+    /// of one another while the same card is re-typeset.
+    private func performRender(_ annotation: TranslationAnnotation, markdown: String) async {
+        let id = annotation.model.id
+        activeRenders[id, default: 0] += 1
+        defer {
+            if let count = activeRenders[id] {
+                if count <= 1 {
+                    activeRenders[id] = nil
+                } else {
+                    activeRenders[id] = count - 1
+                }
+            }
+        }
+        await render(annotation, markdown: markdown)
     }
 
     // MARK: annotation actions
@@ -615,9 +803,11 @@ final class PDFViewModel: ObservableObject {
         annotation.status = .done
         annotation.rendered = nil
         annotation.fallbackText = MarkdownText.plainText(session.draft)
+        // The edit path renders explicitly; mark it so the overlay does not queue a duplicate.
+        lazyRenderAttempted.insert(session.id)
         SelectionOverlay.requestInvalidate()
         Task {
-            await render(annotation, markdown: session.draft)
+            await performRender(annotation, markdown: session.draft)
             guard store.view(for: session.id) === annotation else { return }
             SelectionOverlay.requestInvalidate()
         }
@@ -629,6 +819,12 @@ final class PDFViewModel: ObservableObject {
 
     func delete(_ annotation: TranslationAnnotation) {
         let id = annotation.model.id
+        if annotation.isLoading {
+            // Keep undo meaningful: a restored card should not sit in a permanent skeleton.
+            annotation.status = .failed("已取消")
+        }
+        cancelTranslation(id: id)
+        lazyRenderAttempted.remove(id)
         guard let index = store.remove(id: id) else { return }
         if editing?.id == id { editing = nil }
         scheduleSave()

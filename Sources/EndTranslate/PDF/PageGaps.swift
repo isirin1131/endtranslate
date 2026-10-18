@@ -470,18 +470,29 @@ enum CardSidebarLayout {
             baseHeight: baseHeight,
             widthCost: widthCost,
             heightGrowthCost: growthCost,
-            visualHeight: visualRowHeight(columns: columns, items: items),
+            visualHeight: visualRowHeight(
+                columns: columns,
+                items: items,
+                verticalSpacing: verticalSpacing
+            ),
             isCompactRow: allIndices.allSatisfy { items[$0].isCompactLabel }
         )
     }
 
     /// Height the row would naturally occupy when the vector content is scaled uniformly to
     /// the allocated column width. Stage 3 caps comfort expansion at this value so a wide card
-    /// never becomes an empty frame around text limited by its width.
-    private static func visualRowHeight(columns: [ColumnPlan], items: [LayoutItem]) -> CGFloat {
+    /// never becomes an empty frame around text limited by its width. Stacked sub-columns add
+    /// up their members (plus gaps); taking only the tallest member would under-cap the row and
+    /// crush the lower labels.
+    private static func visualRowHeight(
+        columns: [ColumnPlan],
+        items: [LayoutItem],
+        verticalSpacing: CGFloat
+    ) -> CGFloat {
         var height: CGFloat = 0
         for column in columns {
-            for itemIndex in column.itemIndices {
+            var columnHeight: CGFloat = 0
+            for (slot, itemIndex) in column.itemIndices.enumerated() {
                 let item = items[itemIndex]
                 let contentWidth = max(column.width - 2 * TranslationAnnotation.cardInsetX, 1)
                 let naturalContentWidth = max(
@@ -494,12 +505,11 @@ enum CardSidebarLayout {
                 let naturalContentHeight = max(
                     item.naturalHeight - 2 * TranslationAnnotation.cardInsetY, 1
                 )
-                height = max(
-                    height,
-                    naturalContentHeight * max(contentScale, 0.01)
-                        + 2 * TranslationAnnotation.cardInsetY
-                )
+                if slot > 0 { columnHeight += verticalSpacing }
+                columnHeight += naturalContentHeight * max(contentScale, 0.01)
+                    + 2 * TranslationAnnotation.cardInsetY
             }
+            height = max(height, columnHeight)
         }
         return height
     }
@@ -602,10 +612,7 @@ enum CardSidebarLayout {
                     stackingGap = min(max(verticalSpacing, 0), maximumGap)
                     usable = max(rowHeight - CGFloat(itemCount - 1) * stackingGap, 0)
                 }
-                let weightSum = max(
-                    column.itemIndices.reduce(CGFloat(0)) { $0 + items[$1].naturalHeight },
-                    0.001
-                )
+                let weightSum = max(column.itemHeights.reduce(0, +), 0.001)
                 var y = rowTop
                 var remaining = usable
                 for (slot, itemIndex) in column.itemIndices.enumerated() {
@@ -613,7 +620,10 @@ enum CardSidebarLayout {
                     if slot == itemCount - 1 {
                         height = remaining
                     } else {
-                        height = usable * items[itemIndex].naturalHeight / weightSum
+                        // Use the planned height at this column width; the natural height is
+                        // measured at the card's preferred width and misallocates space when a
+                        // narrow column reflows text taller.
+                        height = usable * column.itemHeights[slot] / weightSum
                         remaining -= height
                     }
                     frames[itemIndex] = CGRect(x: x, y: y, width: columnWidth, height: max(height, 0))

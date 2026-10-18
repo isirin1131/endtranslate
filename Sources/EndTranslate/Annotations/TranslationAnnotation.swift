@@ -27,13 +27,23 @@ final class TranslationAnnotation {
         case failed(String)
     }
 
-    var model: Annotation
+    var model: Annotation { didSet { bumpLayoutRevision() } }
     /// Most recently placed card frame in overlay/export coordinates.
     var bounds: CGRect = .zero
-    var status: Status = .loading
-    var rendered: RenderedTranslation?
+    var status: Status = .loading { didSet { bumpLayoutRevision() } }
+    var rendered: RenderedTranslation? { didSet { bumpLayoutRevision() } }
     /// Plain-text fallback while vector typesetting is unavailable.
-    var fallbackText: String?
+    var fallbackText: String? { didSet { bumpLayoutRevision() } }
+
+    /// Layout metrics are recomputed on every overlay pass (scroll, resize, hover). The
+    /// viewport layout asks for them once per annotation per frame, and measuring fallback
+    /// text with CoreText is expensive, so cache the result until the content changes.
+    private var layoutRevision: UInt64 = 0
+    private var cachedMetrics: (revision: UInt64, maxCardWidth: CGFloat, metrics: LayoutMetrics)?
+
+    private func bumpLayoutRevision() {
+        layoutRevision &+= 1
+    }
 
     static let cardInsetX: CGFloat = 9
     static let cardInsetY: CGFloat = 7
@@ -132,17 +142,24 @@ final class TranslationAnnotation {
     }
 
     func layoutMetrics(maxCardWidth: CGFloat) -> LayoutMetrics {
+        if let cached = cachedMetrics,
+           cached.revision == layoutRevision,
+           cached.maxCardWidth == maxCardWidth {
+            return cached.metrics
+        }
         let size = cardSize(maxCardWidth: maxCardWidth)
         let m = Self.textMetrics(for: displayText)
         let fullWidth = m.hasBlockStructure || m.totalUnits > 42
         let compact = size.height <= 28 || (m.totalUnits > 0 && m.totalUnits <= 18)
-        return LayoutMetrics(
+        let metrics = LayoutMetrics(
             naturalWidth: size.width,
             naturalHeight: size.height,
             contentUnits: m.totalUnits,
             isFullWidth: fullWidth,
             isCompactLabel: compact
         )
+        cachedMetrics = (layoutRevision, maxCardWidth, metrics)
+        return metrics
     }
 
     /// Chooses an adaptive maximum content width based on the translation's length and structure,

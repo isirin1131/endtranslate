@@ -20,7 +20,19 @@ enum PDFExportError: LocalizedError {
 enum PDFExporter {
     static let sidebarWidth: CGFloat = CardSidebarLayout.defaultSidebarWidth
 
-    static func export(document: PDFDocument, overlays: [TranslationAnnotation], to url: URL) throws {
+    /// Exports one page at a time and yields between pages so the reader can show progress and
+    /// cancel. PDFKit is kept on the main actor; jumping to a background executor would race
+    /// the live PDFView and its document. Callers that need to abandon a partial file should
+    /// write to a temporary URL and remove it after `CancellationError`.
+    @MainActor
+    static func export(
+        document: PDFDocument,
+        overlays: [TranslationAnnotation],
+        to url: URL,
+        progress: ((Int, Int) -> Void)? = nil,
+        isCancelled: () -> Bool = { false }
+    ) async throws {
+        let pageCount = document.pageCount
         var byPage: [Int: [TranslationAnnotation]] = [:]
         for overlay in overlays where overlay.status == .done {
             byPage[overlay.model.page, default: []].append(overlay)
@@ -36,7 +48,9 @@ enum PDFExporter {
             throw PDFExportError.cannotCreateContext(url.path)
         }
 
-        for index in 0..<document.pageCount {
+        for index in 0..<pageCount {
+            try Task.checkCancellation()
+            guard !isCancelled() else { throw CancellationError() }
             guard let page = document.page(at: index) else { continue }
             let pageBox = page.bounds(for: .mediaBox)
             let ours = byPage[index] ?? []
@@ -103,9 +117,13 @@ enum PDFExporter {
                 }
             }
             context.endPDFPage()
+            progress?(index + 1, pageCount)
+            await Task.yield()
         }
+        try Task.checkCancellation()
+        guard !isCancelled() else { throw CancellationError() }
         context.closePDF()
-        Log.write("exported \(document.pageCount) page(s) to \(url.lastPathComponent)")
+        Log.write("exported \(pageCount) page(s) to \(url.lastPathComponent)")
     }
 
     private static func drawSidebarBackdrop(pageBox: CGRect, exportBox: CGRect, in context: CGContext) {

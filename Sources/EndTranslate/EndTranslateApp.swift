@@ -89,7 +89,7 @@ struct AppCommands: Commands {
         CommandGroup(replacing: .saveItem) {
             Button("导出带译文的 PDF…") { model?.exportAnnotatedPDF() }
                 .keyboardShortcut("e", modifiers: [.command, .shift])
-                .disabled(model?.document == nil)
+                .disabled(model?.document == nil || model?.isExporting == true)
         }
         CommandGroup(before: .toolbar) {
             Button("前往页…") { model?.requestPageJump() }

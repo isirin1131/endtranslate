@@ -263,6 +263,49 @@ struct PDFNavigationTests {
         #expect(!annotation.bounds.isEmpty)
     }
 
+    @MainActor
+    @Test func visibleCardsRequestLazyTypesettingOnlyForViewportSources() throws {
+        let doc = try document()
+        let view = PDFView(frame: CGRect(x: 0, y: 0, width: 500, height: 300))
+        view.displayMode = .singlePageContinuous
+        view.autoScales = false
+        view.scaleFactor = 1.0
+        view.document = doc
+        view.layoutDocumentView()
+
+        let store = AnnotationStore()
+        func addAnnotation(page: Int, y: CGFloat) -> UUID {
+            let model = Annotation(
+                id: UUID(), page: page,
+                rect: CGRect(x: 60, y: y, width: 200, height: 50),
+                translationMd: "译文", createdAt: Date()
+            )
+            let note = TranslationAnnotation(model: model)
+            note.status = .done
+            note.fallbackText = "译文"
+            store.add(model, view: note)
+            return model.id
+        }
+        let visibleID = addAnnotation(page: 0, y: 380)
+        let offscreenID = addAnnotation(page: 2, y: 380)
+
+        let overlay = SelectionOverlay(pdfView: view)
+        overlay.store = store
+        var requested: [UUID] = []
+        overlay.onAnnotationBecameVisible = { requested.append($0.model.id) }
+        let workspace = ReaderWorkspaceView(pdfView: view, overlay: overlay)
+        workspace.frame = CGRect(x: 0, y: 0, width: 820, height: 300)
+        workspace.layoutSubtreeIfNeeded()
+        let window = NSWindow(contentRect: workspace.frame, styleMask: [.titled],
+                              backing: .buffered, defer: false)
+        window.contentView = workspace
+        window.layoutIfNeeded()
+        overlay.layoutSidebarCards()
+
+        #expect(requested == [visibleID])
+        #expect(!requested.contains(offscreenID))
+    }
+
     @Test func adaptiveCardSizingAnd2DSidebarArrangementKeepsDenseDiagramLabelsCompact() {
         let maxCardWidth: CGFloat = 296
         let shortNote = TranslationAnnotation(model: Annotation(

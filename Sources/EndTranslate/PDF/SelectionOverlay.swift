@@ -14,6 +14,8 @@ final class SelectionOverlay: NSView {
     var onRetranslateAnnotation: ((TranslationAnnotation) -> Void)?
     var onCopyAnnotation: ((TranslationAnnotation) -> Void)?
     var onOpenFile: ((URL) -> Void)?
+    /// A translated card entered the viewport; the view model may typeset it now.
+    var onAnnotationBecameVisible: ((TranslationAnnotation) -> Void)?
     /// Scroll / zoom / resize: lets the model remember the reading position.
     var onViewportChange: (() -> Void)?
     var onSidebarWidthChange: (() -> Void)?
@@ -27,8 +29,29 @@ final class SelectionOverlay: NSView {
     private var lastToken = ""
     private var observers: [NSObjectProtocol] = []
 
-    var sidebarWidth: CGFloat = CardSidebarLayout.defaultSidebarWidth
+    var sidebarWidth: CGFloat = SelectionOverlay.storedSidebarWidth() {
+        didSet {
+            guard !isResizingSidebar else { return }
+            SelectionOverlay.storeSidebarWidth(sidebarWidth)
+        }
+    }
     private var isResizingSidebar = false
+    private static let sidebarWidthKey = "readerSidebarWidth"
+
+    private static func storedSidebarWidth() -> CGFloat {
+        let value = UserDefaults.standard.double(forKey: sidebarWidthKey)
+        guard value.isFinite, value > 0 else { return CardSidebarLayout.defaultSidebarWidth }
+        return min(max(value, CardSidebarLayout.minSidebarWidth), CardSidebarLayout.maxSidebarWidth)
+    }
+
+    private static func storeSidebarWidth(_ width: CGFloat) {
+        guard width.isFinite, width > 0 else { return }
+        UserDefaults.standard.set(Double(width), forKey: sidebarWidthKey)
+    }
+
+    /// Source highlight rects computed during the layout pass, reused by the highlight and
+    /// connector painters so a frame does not convert every annotation three times.
+    private var sourceRects: [UUID: CGRect] = [:]
 
     // A finished selection waits here until the user confirms it on the chip,
     // so a stray trackpad drag never fires a translation by itself.
@@ -299,6 +322,14 @@ final class SelectionOverlay: NSView {
         return convert(pdfView.convert(rect, from: page), from: pdfView)
     }
 
+    /// Overlay-space source box for an annotation. Prefers the rect cached by the current
+    /// layout pass and falls back to a live PDFKit conversion.
+    private func sourceRect(for model: Annotation) -> CGRect? {
+        if let cached = sourceRects[model.id] { return cached }
+        guard let pdfView, let page = pdfView.document?.page(at: model.page) else { return nil }
+        return convert(pdfView.convert(model.rect, from: page), from: pdfView)
+    }
+
     private func originalBounds(page index: Int) -> CGRect? {
         guard let pdfView, let page = displayedPage(index) else { return nil }
         return page.bounds(for: pdfView.displayBox)
@@ -311,7 +342,11 @@ final class SelectionOverlay: NSView {
     /// respond to sidebar mouse hits, and the remaining cards re-justify into the freed space.
     @discardableResult
     func layoutSidebarCards() -> [PlacedSidebarCard] {
-        guard let pdfView, let doc = pdfView.document, let store else { return [] }
+        guard let pdfView, let doc = pdfView.document, let store else {
+            sourceRects.removeAll(keepingCapacity: true)
+            return []
+        }
+        sourceRects.removeAll(keepingCapacity: true)
         let sRect = sidebarRect
         let cardX = sRect.minX + CardSidebarLayout.cardHorizontalInset
         let cardWidth = max(sRect.width - CardSidebarLayout.cardHorizontalInset * 2, 100)
@@ -323,10 +358,12 @@ final class SelectionOverlay: NSView {
             guard let view = store.view(for: model.id),
                   let page = doc.page(at: model.page) else { continue }
             let sourceRect = convert(pdfView.convert(model.rect, from: page), from: pdfView)
+            sourceRects[model.id] = sourceRect
             guard Self.isSourceVisibleInViewport(sourceRect, in: panel) else {
                 view.bounds = .zero
                 continue
             }
+            onAnnotationBecameVisible?(view)
             let metrics = view.layoutMetrics(maxCardWidth: cardWidth)
             specs.append(SidebarCardSpec(
                 id: model.id,
@@ -585,6 +622,7 @@ final class SelectionOverlay: NSView {
     override func mouseUp(with event: NSEvent) {
         if isResizingSidebar {
             isResizingSidebar = false
+            Self.storeSidebarWidth(sidebarWidth)
             needsDisplay = true
             return
         }
@@ -832,11 +870,10 @@ final class SelectionOverlay: NSView {
         ctx.saveGState()
         ctx.clip(to: pdfArea)
 
-        if let pdfView, let doc = pdfView.document, let store {
+        if let store, pdfView?.document != nil {
             for model in store.annotations {
                 guard let view = store.view(for: model.id),
-                      let page = doc.page(at: model.page) else { continue }
-                let sourceRect = convert(pdfView.convert(model.rect, from: page), from: pdfView)
+                      let sourceRect = sourceRect(for: model) else { continue }
                 guard sourceRect.intersects(pdfArea),
                       sourceRect.insetBy(dx: -4, dy: -4).intersects(dirtyRect) else { continue }
                 let isHovered = view === hovered
@@ -998,7 +1035,7 @@ final class SelectionOverlay: NSView {
     }
 
     private func drawConnectors(in ctx: CGContext, onlyHovered: Bool) {
-        guard let pdfView, let doc = pdfView.document, let store, !store.annotations.isEmpty else { return }
+        guard let store, pdfView?.document != nil, !store.annotations.isEmpty else { return }
         if onlyHovered, hovered == nil { return }
         let sRect = sidebarRect
         let visibleVertical = bounds.insetBy(dx: 0, dy: -80)
@@ -1010,8 +1047,7 @@ final class SelectionOverlay: NSView {
         ctx.saveGState()
         for view in viewsToPaint {
             guard !view.bounds.isEmpty,
-                  let page = doc.page(at: view.model.page) else { continue }
-            let sourceRect = convert(pdfView.convert(view.model.rect, from: page), from: pdfView)
+                  let sourceRect = sourceRect(for: view.model) else { continue }
             let cardRect = view.bounds
             guard sourceRect.maxY >= visibleVertical.minY, sourceRect.minY <= visibleVertical.maxY,
                   cardRect.maxY >= visibleVertical.minY, cardRect.minY <= visibleVertical.maxY else { continue }

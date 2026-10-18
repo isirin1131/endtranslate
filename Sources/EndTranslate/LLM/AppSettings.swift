@@ -28,15 +28,11 @@ final class AppSettings: ObservableObject {
 
     /// Local servers (Ollama, LM Studio…) usually run without a key.
     var isLocalEndpoint: Bool {
-        guard let host = URL(string: baseURL.trimmingCharacters(in: .whitespaces))?.host else { return false }
-        return host == "localhost" || host == "127.0.0.1" || host == "::1"
+        LLMClient.Configuration.isLocalEndpoint(baseURL)
     }
 
     var isConfigured: Bool {
-        let hasKey = !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return !baseURL.trimmingCharacters(in: .whitespaces).isEmpty
-            && !model.trimmingCharacters(in: .whitespaces).isEmpty
-            && (hasKey || isLocalEndpoint)
+        LLMClient.Configuration(settings: self).isConfigured
     }
 
     func apply(_ preset: Preset) {

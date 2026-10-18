@@ -16,6 +16,10 @@ struct LLMClient {
         case badURL
         case http(Int, String)
         case emptyResponse
+        /// The service hit its output limit; the returned Markdown is incomplete.
+        case truncated
+        /// The service refused to translate the selected content.
+        case refused
 
         var errorDescription: String? {
             switch self {
@@ -33,6 +37,8 @@ struct LLMClient {
                 default: return "HTTP \(code)\(detail)"
                 }
             case .emptyResponse: return "响应为空或格式不符"
+            case .truncated: return "译文超出模型输出上限，可能不完整，请缩短选区后重试"
+            case .refused: return "服务拒绝了本次翻译内容"
             }
         }
 
@@ -57,22 +63,53 @@ struct LLMClient {
         }
     }
 
-    /// One-line, human wording for anything the translation path can throw.
-    static func describe(_ error: Error) -> String {
-        if let error = error as? URLError {
-            switch error.code {
-            case .timedOut: return "请求超时，请稍后重试"
-            case .notConnectedToInternet, .networkConnectionLost: return "网络未连接"
-            case .cannotFindHost, .dnsLookupFailed: return "无法解析服务器地址，请检查 Base URL"
-            case .cannotConnectToHost: return "无法连接服务器，请检查 Base URL"
-            case .secureConnectionFailed, .serverCertificateUntrusted: return "安全连接失败"
-            case .cancelled: return "已取消"
-            default: return error.localizedDescription
-            }
+    /// Snapshot of the user's service settings, so one translation attempt cannot observe
+    /// half-edited fields while it is running.
+    struct Configuration: Equatable {
+        var baseURL: String
+        var model: String
+        var apiKey: String
+
+        init(baseURL: String, model: String, apiKey: String) {
+            self.baseURL = baseURL
+            self.model = model
+            self.apiKey = apiKey
         }
-        if error is DecodingError { return "响应格式不符（接口是否为 OpenAI 兼容？）" }
-        return error.localizedDescription
+
+        init(settings: AppSettings) {
+            self.init(baseURL: settings.baseURL, model: settings.model, apiKey: settings.apiKey)
+        }
+
+        var isConfigured: Bool {
+            let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasModel = !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let hasKey = !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            return !base.isEmpty && hasModel && (hasKey || Self.isLocalEndpoint(base))
+        }
+
+        /// Local servers (Ollama, LM Studio…) usually run without a key.
+        static func isLocalEndpoint(_ baseURL: String) -> Bool {
+            guard let host = URL(string: baseURL.trimmingCharacters(in: .whitespaces))?.host else {
+                return false
+            }
+            return host == "localhost" || host == "127.0.0.1" || host == "::1"
+        }
     }
+
+    /// Retry only transient failures. `finish_reason == "length"` (or `"max_tokens"`) is
+    /// deliberately not in this list: repeating the same request with the same output limit
+    /// would just truncate again, and the user needs an actionable message instead.
+    struct RetryPolicy: Equatable, Sendable {
+        var maxAttempts: Int = 3
+        var baseDelay: TimeInterval = 1
+        var maxDelay: TimeInterval = 8
+        var maxRetryAfter: TimeInterval = 20
+        /// Stop retrying once the whole translation has spent this long.
+        var totalBudget: TimeInterval = 180
+    }
+
+    typealias Sleeper = @Sendable (TimeInterval) async throws -> Void
+    typealias Clock = @Sendable () -> Date
 
     private struct Request: Encodable {
         struct Message: Encodable {
@@ -92,13 +129,74 @@ struct LLMClient {
 
     private struct Response: Decodable {
         struct Choice: Decodable {
-            struct Message: Decodable { let content: String }
+            struct Message: Decodable {
+                let content: String?
+                let refusal: String?
+            }
             let message: Message
+            let finish_reason: String?
         }
         let choices: [Choice]
     }
 
-    let settings: AppSettings
+    let configuration: Configuration
+    let session: URLSession
+    let retryPolicy: RetryPolicy
+    private let sleeper: Sleeper
+    private let now: Clock
+
+    init(
+        settings: AppSettings,
+        session: URLSession = .shared,
+        retryPolicy: RetryPolicy = RetryPolicy(),
+        sleeper: @escaping Sleeper = LLMClient.defaultSleeper,
+        now: @escaping Clock = { Date() }
+    ) {
+        self.init(
+            configuration: Configuration(settings: settings),
+            session: session,
+            retryPolicy: retryPolicy,
+            sleeper: sleeper,
+            now: now
+        )
+    }
+
+    init(
+        configuration: Configuration,
+        session: URLSession = .shared,
+        retryPolicy: RetryPolicy = RetryPolicy(),
+        sleeper: @escaping Sleeper = LLMClient.defaultSleeper,
+        now: @escaping Clock = { Date() }
+    ) {
+        self.configuration = configuration
+        self.session = session
+        self.retryPolicy = retryPolicy
+        self.sleeper = sleeper
+        self.now = now
+    }
+
+    private static let defaultSleeper: Sleeper = { seconds in
+        guard seconds > 0 else { return }
+        try await Task.sleep(nanoseconds: UInt64(min(seconds, 300) * 1_000_000_000))
+    }
+
+    /// One-line, human wording for anything the translation path can throw.
+    static func describe(_ error: Error) -> String {
+        if error is CancellationError { return "已取消" }
+        if let error = error as? URLError {
+            switch error.code {
+            case .timedOut: return "请求超时，请稍后重试"
+            case .notConnectedToInternet, .networkConnectionLost: return "网络未连接"
+            case .cannotFindHost, .dnsLookupFailed: return "无法解析服务器地址，请检查 Base URL"
+            case .cannotConnectToHost: return "无法连接服务器，请检查 Base URL"
+            case .secureConnectionFailed, .serverCertificateUntrusted: return "安全连接失败"
+            case .cancelled: return "已取消"
+            default: return error.localizedDescription
+            }
+        }
+        if error is DecodingError { return "响应格式不符（接口是否为 OpenAI 兼容？）" }
+        return error.localizedDescription
+    }
 
     func translate(imagePNG: Data) async throws -> String {
         let text = try await chat(system: Prompts.system, user: Prompts.user, imagePNG: imagePNG)
@@ -120,20 +218,88 @@ struct LLMClient {
     }
 
     func chat(system: String, user: String, imagePNG: Data) async throws -> String {
-        guard settings.isConfigured else { throw LLMError.notConfigured }
-        let base = settings.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard configuration.isConfigured else { throw LLMError.notConfigured }
+        let request = try makeRequest(system: system, user: user, imagePNG: imagePNG)
+        let started = now()
+        let maxAttempts = min(max(retryPolicy.maxAttempts, 1), 5)
+        var lastError: Error = LLMError.emptyResponse
+
+        for attempt in 1...maxAttempts {
+            try Task.checkCancellation()
+            let remainingBudget = retryPolicy.totalBudget - now().timeIntervalSince(started)
+            guard remainingBudget > 1 else { throw lastError }
+            var attemptRequest = request
+            attemptRequest.timeoutInterval = min(120, max(1, remainingBudget))
+            do {
+                let (data, response) = try await session.data(for: attemptRequest)
+                try Task.checkCancellation()
+                guard let http = response as? HTTPURLResponse else {
+                    throw LLMError.emptyResponse
+                }
+                if (200..<300).contains(http.statusCode) {
+                    return try decode(data)
+                }
+
+                let error = LLMError.http(
+                    http.statusCode,
+                    String(data: data.prefix(500), encoding: .utf8) ?? ""
+                )
+                lastError = error
+                guard attempt < maxAttempts, Self.isRetryable(statusCode: http.statusCode) else {
+                    throw error
+                }
+                guard let delay = retryDelay(
+                    attempt: attempt,
+                    retryAfterHeader: http.value(forHTTPHeaderField: "Retry-After"),
+                    started: started
+                ) else {
+                    throw error
+                }
+                Log.write("LLM retry \(attempt + 1)/\(maxAttempts) after HTTP \(http.statusCode) in \(String(format: "%.1f", delay))s")
+                try await sleeper(delay)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as URLError {
+                if error.code == .cancelled { throw CancellationError() }
+                lastError = error
+                guard attempt < maxAttempts, Self.isRetryable(urlError: error) else {
+                    throw error
+                }
+                guard let delay = retryDelay(
+                    attempt: attempt,
+                    retryAfterHeader: nil,
+                    started: started
+                ) else {
+                    throw error
+                }
+                Log.write("LLM retry \(attempt + 1)/\(maxAttempts) after \(error.code.rawValue) in \(String(format: "%.1f", delay))s")
+                try await sleeper(delay)
+            } catch let error as LLMError {
+                throw error
+            } catch {
+                throw error
+            }
+        }
+        throw lastError
+    }
+
+    private func makeRequest(system: String, user: String, imagePNG: Data) throws -> URLRequest {
+        let base = configuration.baseURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard let url = URL(string: base + "/chat/completions"), url.host != nil else { throw LLMError.badURL }
+        guard let url = URL(string: base + "/chat/completions"), url.host != nil else {
+            throw LLMError.badURL
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let key = settings.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = configuration.apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !key.isEmpty {
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         }
         let body = Request(
-            model: settings.model.trimmingCharacters(in: .whitespaces),
+            model: configuration.model.trimmingCharacters(in: .whitespaces),
             messages: [
                 .init(role: "system", content: [
                     .init(type: "text", text: system, image_url: nil)
@@ -148,19 +314,65 @@ struct LLMClient {
         )
         request.httpBody = try JSONEncoder().encode(body)
         Log.write("LLM request: image=\(imagePNG.count / 1024)KB")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw LLMError.emptyResponse }
-        guard (200..<300).contains(http.statusCode) else {
-            let snippet = String(data: data.prefix(500), encoding: .utf8) ?? ""
-            Log.write("LLM HTTP \(http.statusCode)")
-            throw LLMError.http(http.statusCode, snippet)
-        }
+        return request
+    }
+
+    private func decode(_ data: Data) throws -> String {
         let decoded = try JSONDecoder().decode(Response.self, from: data)
-        guard let text = decoded.choices.first?.message.content, !text.isEmpty else {
-            Log.write("LLM empty/unexpected response")
+        guard let choice = decoded.choices.first else { throw LLMError.emptyResponse }
+        if choice.finish_reason == "length" || choice.finish_reason == "max_tokens" {
+            throw LLMError.truncated
+        }
+        if choice.finish_reason == "content_filter" || choice.message.refusal != nil {
+            throw LLMError.refused
+        }
+        guard let text = choice.message.content, !text.isEmpty else {
             throw LLMError.emptyResponse
         }
         Log.write("LLM OK, \(text.count) chars")
         return text
+    }
+
+    /// Sleep before the next attempt, or return nil when the retry budget is exhausted.
+    private func retryDelay(attempt: Int, retryAfterHeader: String?, started: Date) -> TimeInterval? {
+        let exponent = pow(2, Double(max(attempt - 1, 0)))
+        let base = min(max(retryPolicy.maxDelay, 0), max(retryPolicy.baseDelay, 0) * exponent)
+        let jitter = Double.random(in: 0...0.25) * base
+        var delay = base + jitter
+        if let retryAfter = Self.retryAfterInterval(retryAfterHeader, now: now()) {
+            delay = max(delay, min(retryAfter, max(retryPolicy.maxRetryAfter, 0)))
+        }
+        let remaining = retryPolicy.totalBudget - now().timeIntervalSince(started)
+        guard remaining > 0.5 else { return nil }
+        return min(delay, remaining)
+    }
+
+    private static func isRetryable(statusCode: Int) -> Bool {
+        [408, 429, 500, 502, 503, 504].contains(statusCode)
+    }
+
+    private static func isRetryable(urlError: URLError) -> Bool {
+        switch urlError.code {
+        case .timedOut, .networkConnectionLost, .cannotConnectToHost:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// `Retry-After` is either delta-seconds or an HTTP date.
+    private static func retryAfterInterval(_ header: String?, now: Date) -> TimeInterval? {
+        guard let raw = header?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        if let seconds = TimeInterval(raw), seconds >= 0 {
+            return seconds
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        guard let date = formatter.date(from: raw) else { return nil }
+        return max(0, date.timeIntervalSince(now))
     }
 }

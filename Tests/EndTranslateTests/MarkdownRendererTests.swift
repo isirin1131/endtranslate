@@ -151,4 +151,25 @@ final class MarkdownRendererTests {
         #expect(medium.size.width < 130)
         #expect(long.size.width > 240)
     }
+
+    @Test func viewModelTypesetsRestoredCardOnlyWhenRequested() async throws {
+        let model = PDFViewModel()
+        let note = TranslationAnnotation(model: Annotation(
+            id: UUID(), page: 0,
+            rect: CGRect(x: 40, y: 80, width: 220, height: 50),
+            translationMd: "LAZYTOKEN $x^2$", createdAt: Date()
+        ))
+        note.status = .done
+        note.fallbackText = "LAZYTOKEN x^2"
+        model.store.add(note.model, view: note)
+        #expect(note.rendered == nil)
+
+        model.ensureRendered(note)
+        let deadline = Date().addingTimeInterval(10)
+        while note.rendered == nil, Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        #expect(note.rendered != nil)
+        #expect(note.fallbackText == nil)
+    }
 }
