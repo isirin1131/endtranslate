@@ -8,13 +8,13 @@ A native macOS PDF reader with inline translation, LaTeX math rendering, and ann
 
 ## 效果预览
 
-左侧是专门撰写的合成演示 PDF，不包含任何论文、书籍或网页原文；右侧译文卡片由内置 WebKit + MathJax 排版，分式、根号、矩阵、希腊字母和表格在放大阅读及导出 PDF 时都保持矢量清晰。
+左侧是专门撰写的合成演示 PDF，不包含任何论文、书籍或网页原文；原文段落与右侧译文卡片使用同一段公式内容，两边都由内置 WebKit + MathJax 排版，分式、根号、矩阵和希腊字母在放大阅读及导出 PDF 时保持矢量清晰。
 
-![EndTranslate 阅读界面：左侧合成原文与高亮框，右侧译文卡片中的复杂公式](docs/images/reader-demo.png)
+![EndTranslate 阅读界面：左侧合成原文同样包含矢量公式，右侧译文卡片逐句对应](docs/images/reader-demo.png)
 
-密集场景下，侧边栏会把短标签自动排成多列 Bento 网格，图注独占整行；静止状态隐藏长连线，只在原文框保留锚点，避免十几条引线互相覆盖。悬停任一侧时再显示当前配对。
+密集场景下，侧边栏会把短标签自动排成多列 Bento 网格；静止状态隐藏长连线，只在原文框保留锚点，避免十几条引线互相覆盖。悬停任一侧时再显示当前配对。
 
-![密集场景：短标签排成多列网格，图注占满整行，静止时不绘制长引线](docs/images/dense-demo.png)
+![密集场景：短标签排成多列网格，静止时不绘制长引线](docs/images/dense-demo.png)
 
 ![密集场景悬停：输出 logits 的原文框与卡片成对高亮，只显示当前配对的一条引线](docs/images/dense-hover-demo.png)
 
