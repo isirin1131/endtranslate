@@ -17,7 +17,9 @@ struct LLMClient {
         case http(Int, String)
         case emptyResponse
         /// The service hit its output limit; the returned Markdown is incomplete.
-        case truncated
+        /// `reasoningTokens` separates "the model thought until the budget ran out"
+        /// from "the translation itself is too long" — different remedies.
+        case truncated(reasoningTokens: Int)
         /// The service refused to translate the selected content.
         case refused
 
@@ -37,7 +39,12 @@ struct LLMClient {
                 default: return "HTTP \(code)\(detail)"
                 }
             case .emptyResponse: return "响应为空或格式不符"
-            case .truncated: return "译文超出模型输出上限，可能不完整，请缩短选区后重试"
+            case .truncated(let reasoningTokens):
+                // Thinking and the visible answer share one budget, so a short
+                // translation can still be truncated by a long reasoning pass.
+                return reasoningTokens > 0
+                    ? "模型在思考上耗尽了输出额度，译文未完成，请重试"
+                    : "译文超出模型输出上限，可能不完整，请缩短选区后重试"
             case .refused: return "服务拒绝了本次翻译内容"
             }
         }
@@ -69,15 +76,24 @@ struct LLMClient {
         var baseURL: String
         var model: String
         var apiKey: String
+        /// DeepSeek-only: let the model reason before writing. Off by default because
+        /// reasoning shares `max_tokens` with the answer and adds seconds per selection.
+        var thinking: Bool
 
-        init(baseURL: String, model: String, apiKey: String) {
+        init(baseURL: String, model: String, apiKey: String, thinking: Bool = false) {
             self.baseURL = baseURL
             self.model = model
             self.apiKey = apiKey
+            self.thinking = thinking
         }
 
         init(settings: AppSettings) {
-            self.init(baseURL: settings.baseURL, model: settings.model, apiKey: settings.apiKey)
+            self.init(
+                baseURL: settings.baseURL,
+                model: settings.model,
+                apiKey: settings.apiKey,
+                thinking: settings.thinkingEnabled
+            )
         }
 
         var isConfigured: Bool {
@@ -94,11 +110,20 @@ struct LLMClient {
             }
             return host == "localhost" || host == "127.0.0.1" || host == "::1"
         }
+
+        /// DeepSeek defaults to thinking mode and exposes a `thinking` switch; other
+        /// OpenAI-compatible endpoints reject unknown fields, so the switch is opt-in
+        /// per host rather than sent blindly.
+        var supportsThinkingControl: Bool {
+            guard let host = URL(string: baseURL.trimmingCharacters(in: .whitespacesAndNewlines))?
+                .host?.lowercased() else { return false }
+            return host == "deepseek.com" || host.hasSuffix(".deepseek.com")
+        }
     }
 
     /// Retry only transient failures. `finish_reason == "length"` (or `"max_tokens"`) is
-    /// deliberately not in this list: repeating the same request with the same output limit
-    /// would just truncate again, and the user needs an actionable message instead.
+    /// not retried as-is: the same request with the same output limit would truncate again.
+    /// It gets one *changed* attempt (thinking off / larger budget) instead.
     struct RetryPolicy: Equatable, Sendable {
         var maxAttempts: Int = 3
         var baseDelay: TimeInterval = 1
@@ -112,6 +137,7 @@ struct LLMClient {
     typealias Clock = @Sendable () -> Date
 
     private struct Request: Encodable {
+        struct Thinking: Encodable { let type: String }
         struct Message: Encodable {
             struct Part: Encodable {
                 struct ImageURL: Encodable { let url: String }
@@ -125,6 +151,8 @@ struct LLMClient {
         let model: String
         let messages: [Message]
         let max_tokens: Int
+        /// Omitted for services that don't understand it (see `supportsThinkingControl`).
+        let thinking: Thinking?
     }
 
     private struct Response: Decodable {
@@ -136,7 +164,15 @@ struct LLMClient {
             let message: Message
             let finish_reason: String?
         }
+        struct Usage: Decodable {
+            struct CompletionDetails: Decodable {
+                let reasoning_tokens: Int?
+            }
+            let completion_tokens: Int?
+            let completion_tokens_details: CompletionDetails?
+        }
         let choices: [Choice]
+        let usage: Usage?
     }
 
     let configuration: Configuration
@@ -219,10 +255,17 @@ struct LLMClient {
 
     func chat(system: String, user: String, imagePNG: Data) async throws -> String {
         guard configuration.isConfigured else { throw LLMError.notConfigured }
-        let request = try makeRequest(system: system, user: user, imagePNG: imagePNG)
+        var maxTokens = outputBudget
+        var thinking = configuration.supportsThinkingControl && configuration.thinking
+        var request = try makeRequest(
+            system: system, user: user, imagePNG: imagePNG,
+            maxTokens: maxTokens, thinking: thinking
+        )
         let started = now()
         let maxAttempts = min(max(retryPolicy.maxAttempts, 1), 5)
         var lastError: Error = LLMError.emptyResponse
+        /// At most one escalation: re-ask with thinking off / a larger output budget.
+        var escalated = false
 
         for attempt in 1...maxAttempts {
             try Task.checkCancellation()
@@ -237,7 +280,26 @@ struct LLMClient {
                     throw LLMError.emptyResponse
                 }
                 if (200..<300).contains(http.statusCode) {
-                    return try decode(data)
+                    do {
+                        return try decode(data)
+                    } catch LLMError.truncated(let reasoningTokens) where !escalated {
+                        let error = LLMError.truncated(reasoningTokens: reasoningTokens)
+                        lastError = error
+                        // Only a reasoning pass can be crowded out of the budget; a
+                        // genuinely long answer would just be truncated again.
+                        guard reasoningTokens > 0 else { throw error }
+                        let nextBudget = escalatedBudget(from: maxTokens)
+                        guard nextBudget > maxTokens || thinking else { throw error }
+                        escalated = true
+                        maxTokens = max(maxTokens, nextBudget)
+                        thinking = false
+                        request = try makeRequest(
+                            system: system, user: user, imagePNG: imagePNG,
+                            maxTokens: maxTokens, thinking: thinking
+                        )
+                        Log.write("LLM truncated after \(reasoningTokens) reasoning tokens; retrying with max_tokens=\(maxTokens), thinking=\(thinking)")
+                        continue
+                    }
                 }
 
                 let error = LLMError.http(
@@ -283,7 +345,28 @@ struct LLMClient {
         throw lastError
     }
 
-    private func makeRequest(system: String, user: String, imagePNG: Data) throws -> URLRequest {
+    /// Room for the visible answer, not a target: models stop at `stop` long before.
+    /// DeepSeek shares this budget with its thinking pass, and its non-thinking default
+    /// is 8K, so 4K was leaving no room for formula-heavy pages.
+    private var outputBudget: Int {
+        guard configuration.supportsThinkingControl else { return 4096 }
+        return configuration.thinking ? 16384 : 8192
+    }
+
+    /// Turning thinking off frees the budget the reasoning pass consumed. Other services
+    /// get a modestly larger cap instead, since the switch isn't theirs to honour.
+    private func escalatedBudget(from current: Int) -> Int {
+        if configuration.supportsThinkingControl { return max(current, 8192) }
+        return min(max(current * 2, 8192), 16384)
+    }
+
+    private func makeRequest(
+        system: String,
+        user: String,
+        imagePNG: Data,
+        maxTokens: Int,
+        thinking: Bool
+    ) throws -> URLRequest {
         let base = configuration.baseURL
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -310,18 +393,23 @@ struct LLMClient {
                           image_url: .init(url: "data:image/png;base64,\(imagePNG.base64EncodedString())"))
                 ])
             ],
-            max_tokens: 4096
+            max_tokens: maxTokens,
+            thinking: configuration.supportsThinkingControl
+                ? .init(type: thinking ? "enabled" : "disabled")
+                : nil
         )
         request.httpBody = try JSONEncoder().encode(body)
-        Log.write("LLM request: image=\(imagePNG.count / 1024)KB")
+        Log.write("LLM request: image=\(imagePNG.count / 1024)KB max_tokens=\(maxTokens) thinking=\(configuration.supportsThinkingControl ? String(thinking) : "n/a")")
         return request
     }
 
     private func decode(_ data: Data) throws -> String {
         let decoded = try JSONDecoder().decode(Response.self, from: data)
         guard let choice = decoded.choices.first else { throw LLMError.emptyResponse }
+        let reasoningTokens = decoded.usage?.completion_tokens_details?.reasoning_tokens ?? 0
         if choice.finish_reason == "length" || choice.finish_reason == "max_tokens" {
-            throw LLMError.truncated
+            Log.write("LLM truncated: completion=\(decoded.usage?.completion_tokens ?? -1) reasoning=\(reasoningTokens)")
+            throw LLMError.truncated(reasoningTokens: reasoningTokens)
         }
         if choice.finish_reason == "content_filter" || choice.message.refusal != nil {
             throw LLMError.refused
@@ -329,7 +417,7 @@ struct LLMClient {
         guard let text = choice.message.content, !text.isEmpty else {
             throw LLMError.emptyResponse
         }
-        Log.write("LLM OK, \(text.count) chars")
+        Log.write("LLM OK, \(text.count) chars (reasoning=\(reasoningTokens))")
         return text
     }
 

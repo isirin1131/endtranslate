@@ -7,6 +7,11 @@ final class AppSettings: ObservableObject {
     @Published var baseURL: String { didSet { UserDefaults.standard.set(baseURL, forKey: "baseURL") } }
     @Published var model: String { didSet { UserDefaults.standard.set(model, forKey: "model") } }
     @Published var apiKey: String { didSet { Keychain.write(account: "apiKey", value: apiKey) } }
+    /// DeepSeek-only; ignored for services without a thinking switch. Off by default:
+    /// the reasoning pass shares `max_tokens` with the answer and slows each selection.
+    @Published var thinkingEnabled: Bool {
+        didSet { UserDefaults.standard.set(thinkingEnabled, forKey: "thinkingEnabled") }
+    }
 
     struct Preset: Identifiable {
         let name: String
@@ -24,11 +29,17 @@ final class AppSettings: ObservableObject {
         baseURL = UserDefaults.standard.string(forKey: "baseURL") ?? "https://api.openai.com/v1"
         model = UserDefaults.standard.string(forKey: "model") ?? "gpt-4o"
         apiKey = Keychain.read(account: "apiKey") ?? ""
+        thinkingEnabled = UserDefaults.standard.bool(forKey: "thinkingEnabled")
     }
 
     /// Local servers (Ollama, LM Studio…) usually run without a key.
     var isLocalEndpoint: Bool {
         LLMClient.Configuration.isLocalEndpoint(baseURL)
+    }
+
+    /// Whether the current service exposes a thinking switch worth showing in Settings.
+    var supportsThinkingControl: Bool {
+        LLMClient.Configuration(settings: self).supportsThinkingControl
     }
 
     var isConfigured: Bool {

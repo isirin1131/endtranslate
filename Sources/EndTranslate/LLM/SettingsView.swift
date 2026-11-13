@@ -17,6 +17,17 @@ struct SettingsView: View {
                 TextField("Base URL", text: $settings.baseURL, prompt: Text("https://api.openai.com/v1"))
                 SecureField("API Key", text: $settings.apiKey, prompt: Text(settings.isLocalEndpoint ? "本地服务可留空" : "sk-…"))
                 TextField("模型", text: $settings.model, prompt: Text("gpt-4o"))
+                if settings.supportsThinkingControl {
+                    Toggle(isOn: $settings.thinkingEnabled) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("深度思考")
+                            Text("先推理再翻译，公式排版更稳，但每次更慢。关闭后输出额度全部留给译文。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                }
             } header: {
                 HStack {
                     Text("翻译服务")
@@ -63,7 +74,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 520, height: 340)
+        .frame(width: 520, height: 400)
         .onChange(of: settings.baseURL) { testResult = nil }
         .onChange(of: settings.apiKey) { testResult = nil }
         .onChange(of: settings.model) { testResult = nil }
