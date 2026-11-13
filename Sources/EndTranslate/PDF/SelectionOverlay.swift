@@ -60,6 +60,9 @@ final class SelectionOverlay: NSView {
     private var adjustment: SelectionAdjustment?
     private weak var menuAnnotation: TranslationAnnotation?
     private weak var hovered: TranslationAnnotation?
+    private weak var zoomedAnnotation: TranslationAnnotation?
+    private var hoverProgress: CGFloat = 0
+    private var lastHoverStepTime: TimeInterval = 0
     private var hoveredChipButton: Int?
     private var dividerHovered = false
     private var dropHighlight = false
@@ -187,9 +190,15 @@ final class SelectionOverlay: NSView {
 
     private var hasLoadingAnnotation: Bool { !loadingAnnotations.isEmpty }
     private var isDraggingSelection: Bool { anchorPage != nil || adjustment != nil }
+    private var targetHoverProgress: CGFloat {
+        (hovered != nil && !(hovered?.isLoading ?? true)) ? 1 : 0
+    }
+    private var isHoverAnimating: Bool {
+        zoomedAnnotation != nil && abs(hoverProgress - targetHoverProgress) > 0.001
+    }
 
     private func updateAnimationTimer() {
-        let needed = isDraggingSelection || hasLoadingAnnotation || Date() < settleUntil
+        let needed = isDraggingSelection || hasLoadingAnnotation || isHoverAnimating || Date() < settleUntil
         if needed, animationTimer == nil {
             let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.tick() }
@@ -209,6 +218,9 @@ final class SelectionOverlay: NSView {
             recomputeSelection()
             changed = true
         }
+        if advanceHoverAnimation(now: Date().timeIntervalSinceReferenceDate) {
+            changed = true
+        }
         let token = transformToken()
         if token != lastToken { lastToken = token; changed = true }
         if changed {
@@ -220,6 +232,72 @@ final class SelectionOverlay: NSView {
             }
         }
         updateAnimationTimer()
+    }
+
+    private func advanceHoverAnimation(now: TimeInterval) -> Bool {
+        guard zoomedAnnotation != nil else { return false }
+        let target = targetHoverProgress
+        guard abs(hoverProgress - target) > 0.001 else {
+            if target == 0 {
+                hoverProgress = 0
+                zoomedAnnotation = nil
+            }
+            return false
+        }
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            hoverProgress = target
+            if target == 0 { zoomedAnnotation = nil }
+            return true
+        }
+        let dt = min(max(now - lastHoverStepTime, 0), 1.0 / 15.0)
+        lastHoverStepTime = now
+        let duration: TimeInterval = target > hoverProgress ? 0.16 : 0.12
+        let step = CGFloat(dt / duration)
+        if target > hoverProgress {
+            hoverProgress = min(target, hoverProgress + step)
+        } else {
+            hoverProgress = max(target, hoverProgress - step)
+            if hoverProgress <= 0.001 {
+                hoverProgress = 0
+                zoomedAnnotation = nil
+            }
+        }
+        return true
+    }
+
+    private func sidebarSharedScale() -> CGFloat {
+        guard let store else { return 1.0 }
+        let sRect = sidebarRect
+        let visibleCards: [(RenderedTranslation, CGRect)] = store.annotations.compactMap { model in
+            guard let view = store.view(for: model.id),
+                  let rendered = view.rendered,
+                  !view.bounds.isEmpty,
+                  view.bounds.intersects(sRect) else { return nil }
+            return (rendered, view.bounds)
+        }
+        return SidebarCardPainter.sharedScale(for: visibleCards)
+    }
+
+    private func cardPresentation(
+        for view: TranslationAnnotation,
+        baseScale: CGFloat
+    ) -> SidebarCardPainter.HoverLayout {
+        guard view === zoomedAnnotation, hoverProgress > 0, !view.bounds.isEmpty else {
+            return SidebarCardPainter.HoverLayout(frame: view.bounds, scale: baseScale)
+        }
+        return SidebarCardPainter.hoverLayout(
+            for: view,
+            baseRect: view.bounds,
+            baseScale: baseScale,
+            sidebarRect: sidebarRect,
+            viewportBounds: bounds,
+            progress: hoverProgress
+        )
+    }
+
+    private func activeHoveredExpandedFrame() -> CGRect? {
+        guard let hovered, !hovered.isLoading, !hovered.bounds.isEmpty else { return nil }
+        return cardPresentation(for: hovered, baseScale: sidebarSharedScale()).frame
     }
 
     private func transformToken() -> String {
@@ -255,7 +333,9 @@ final class SelectionOverlay: NSView {
     }
 
     private func updateHover(at p: NSPoint) {
-        if isResizingSidebar || isNearDivider(p) {
+        let hoveredExpandedRect = activeHoveredExpandedFrame()
+        let onHoveredExpanded = hoveredExpandedRect?.contains(p) ?? false
+        if !onHoveredExpanded && (isResizingSidebar || isNearDivider(p)) {
             setDividerHovered(true)
             setHovered(nil, chipButton: nil)
             NSCursor.resizeLeftRight.set()
@@ -273,14 +353,14 @@ final class SelectionOverlay: NSView {
             NSCursor.pointingHand.set()
             return
         }
-        if p.x < sidebarRect.minX, let kind = pendingInteraction(at: p) {
+        if p.x < sidebarRect.minX, !onHoveredExpanded, let kind = pendingInteraction(at: p) {
             setHovered(nil, chipButton: nil)
             cursor(for: kind).set()
             return
         }
         let hit = annotation(at: p)
         setHovered(hit, chipButton: nil)
-        if p.x >= sidebarRect.minX {
+        if p.x >= sidebarRect.minX || (hit != nil && hit === hovered && onHoveredExpanded) {
             (hit != nil ? NSCursor.pointingHand : NSCursor.arrow).set()
         } else if hit?.isFailed == true {
             NSCursor.pointingHand.set()
@@ -295,6 +375,19 @@ final class SelectionOverlay: NSView {
         guard annotation !== hovered || chipButton != hoveredChipButton else { return }
         hovered = annotation
         hoveredChipButton = chipButton
+        if let annotation, !annotation.isLoading {
+            if zoomedAnnotation !== annotation {
+                zoomedAnnotation = annotation
+                hoverProgress = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 1 : 0
+            } else if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                hoverProgress = 1
+            }
+        } else if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            hoverProgress = 0
+            zoomedAnnotation = nil
+        }
+        lastHoverStepTime = Date().timeIntervalSinceReferenceDate
+        updateAnimationTimer()
         needsDisplay = true
     }
 
@@ -476,6 +569,11 @@ final class SelectionOverlay: NSView {
 
     private func annotation(at overlayPoint: NSPoint) -> TranslationAnnotation? {
         guard let store else { return nil }
+        // Keep the active magnified card stable even when its expanded frame overlaps neighbors
+        // or floats across the sidebar divider.
+        if let hovered, let expandedFrame = activeHoveredExpandedFrame(), expandedFrame.contains(overlayPoint) {
+            return hovered
+        }
         // Card frames from the last layout pass are already in `bounds`; laying out again on
         // every mouseMoved would additionally kick off lazy typesetting while merely hovering.
         if overlayPoint.x >= sidebarRect.minX {
@@ -551,7 +649,8 @@ final class SelectionOverlay: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if isNearDivider(p) {
+        let onHoveredExpanded = activeHoveredExpandedFrame()?.contains(p) ?? false
+        if !onHoveredExpanded && isNearDivider(p) {
             isResizingSidebar = true
             NSCursor.resizeLeftRight.set()
             return
@@ -567,7 +666,7 @@ final class SelectionOverlay: NSView {
             }
             if chip.frame.contains(p) { return }
         }
-        if p.x < sidebarRect.minX, let page = pendingPage,
+        if p.x < sidebarRect.minX, !onHoveredExpanded, let page = pendingPage,
            let kind = pendingInteraction(at: p), let origin = originalPoint(p, page: page) {
             window?.makeFirstResponder(self)
             adjustment = SelectionAdjustment(kind: kind, startPoint: origin, startRect: pendingRect)
@@ -579,8 +678,8 @@ final class SelectionOverlay: NSView {
         }
         if pendingPage != nil { cancelPending() }
 
-        // Clicking inside the right sidebar interacts with translation cards directly.
-        if p.x >= sidebarRect.minX {
+        // Clicking inside the right sidebar (or the floating magnified card) interacts with cards.
+        if p.x >= sidebarRect.minX || onHoveredExpanded {
             if let pdfView { window?.makeFirstResponder(pdfView) }
             if let hit = annotation(at: p) {
                 if event.clickCount >= 2 {
@@ -879,7 +978,12 @@ final class SelectionOverlay: NSView {
 
         let pairs = visibleConnectorPairs()
         guard let activePair = pairs.first(where: { $0.view === hovered }) else {
-            if hovered != nil { hovered = nil }
+            if hovered != nil {
+                hovered = nil
+                zoomedAnnotation = nil
+                hoverProgress = 0
+                updateAnimationTimer()
+            }
             drawSidebarContent(pairs: pairs, activePair: nil, in: ctx, dirtyRect: dirtyRect)
             return
         }
@@ -909,12 +1013,13 @@ final class SelectionOverlay: NSView {
     private func visibleConnectorPairs() -> [VisibleConnectorPair] {
         guard let store, pdfView?.document != nil else { return [] }
         let visibleVertical = bounds.insetBy(dx: 0, dy: -80)
+        let baseScale = sidebarSharedScale()
         var pairs: [VisibleConnectorPair] = []
         pairs.reserveCapacity(store.annotations.count)
         for model in store.annotations {
             guard let view = store.view(for: model.id), !view.bounds.isEmpty,
                   let source = sourceRect(for: model) else { continue }
-            let cardRect = view.bounds
+            let cardRect = cardPresentation(for: view, baseScale: baseScale).frame
             guard source.maxY >= visibleVertical.minY, source.minY <= visibleVertical.maxY,
                   cardRect.maxY >= visibleVertical.minY, cardRect.minY <= visibleVertical.maxY else { continue }
             pairs.append(VisibleConnectorPair(view: view, sourceRect: source, cardRect: cardRect))
@@ -979,11 +1084,7 @@ final class SelectionOverlay: NSView {
         ctx.setLineJoin(.round)
 
         ctx.saveGState()
-        ctx.clip(to: pdfPanelRect)
-        ctx.setStrokeColor(onPaper.withAlphaComponent(0.14).cgColor)
-        ctx.setLineWidth(ConnectorStyle.activeHaloWidth)
-        ctx.addPath(path)
-        ctx.strokePath()
+        clip(pdfPanelRect, excludingCardsIn: ctx)
         ctx.setStrokeColor(onPaper.withAlphaComponent(0.92).cgColor)
         ctx.setLineWidth(ConnectorStyle.activeLineWidth)
         ctx.addPath(path)
@@ -991,11 +1092,7 @@ final class SelectionOverlay: NSView {
         ctx.restoreGState()
 
         ctx.saveGState()
-        clipToSidebar(excludingCardsIn: ctx)
-        ctx.setStrokeColor(onChrome.withAlphaComponent(0.18).cgColor)
-        ctx.setLineWidth(ConnectorStyle.activeHaloWidth)
-        ctx.addPath(path)
-        ctx.strokePath()
+        clip(sidebarRect, excludingCardsIn: ctx)
         ctx.setStrokeColor(onChrome.withAlphaComponent(0.95).cgColor)
         ctx.setLineWidth(ConnectorStyle.activeLineWidth)
         ctx.addPath(path)
@@ -1011,24 +1108,22 @@ final class SelectionOverlay: NSView {
         let radius = ConnectorStyle.cardEndpointRadius
         let center = connector.end
         ctx.saveGState()
-        ctx.setFillColor(NSColor.white.cgColor)
-        ctx.fillEllipse(in: CGRect(x: center.x - radius - 1.2, y: center.y - radius - 1.2,
-                                   width: (radius + 1.2) * 2, height: (radius + 1.2) * 2))
         ctx.setFillColor(color.withAlphaComponent(0.95).cgColor)
         ctx.fillEllipse(in: CGRect(x: center.x - radius, y: center.y - radius,
                                    width: radius * 2, height: radius * 2))
         ctx.restoreGState()
     }
 
-    private func clipToSidebar(excludingCardsIn ctx: CGContext) {
+    private func clip(_ region: CGRect, excludingCardsIn ctx: CGContext) {
         let clipPath = CGMutablePath()
-        clipPath.addRect(sidebarRect)
+        clipPath.addRect(region)
         if let store {
+            let baseScale = sidebarSharedScale()
             let radius = SidebarCardStyle.cornerRadius
             for model in store.annotations {
-                guard let view = store.view(for: model.id), !view.bounds.isEmpty,
-                      view.bounds.intersects(sidebarRect) else { continue }
-                let rect = view.bounds
+                guard let view = store.view(for: model.id), !view.bounds.isEmpty else { continue }
+                let rect = cardPresentation(for: view, baseScale: baseScale).frame
+                guard rect.intersects(region) else { continue }
                 let corner = min(radius, min(rect.width, rect.height) * 0.35)
                 clipPath.addPath(CGPath(roundedRect: rect, cornerWidth: corner,
                                         cornerHeight: corner, transform: nil))
@@ -1102,55 +1197,13 @@ final class SelectionOverlay: NSView {
                       let sourceRect = sourceRect(for: model) else { continue }
                 guard sourceRect.intersects(pdfArea),
                       sourceRect.insetBy(dx: -4, dy: -4).intersects(dirtyRect) else { continue }
-                let isHovered = view === hovered
-                let failed = view.isFailed
-                let color: NSColor = failed ? ReaderTheme.inkError : ReaderTheme.inkAccent
-                let fill: NSColor
-                let stroke: NSColor
-                if failed {
-                    fill = ReaderTheme.errorFill
-                    stroke = isHovered ? ReaderTheme.errorStrokeHover
-                        : anyHovered ? ReaderTheme.errorStroke.withAlphaComponent(0.30)
-                        : ReaderTheme.errorStroke
-                } else {
-                    fill = isHovered ? ReaderTheme.sourceFillHover : ReaderTheme.sourceFill
-                    stroke = isHovered ? ReaderTheme.sourceStrokeHover
-                        : anyHovered ? ReaderTheme.sourceDimmedStroke
-                        : ReaderTheme.sourceStroke
-                }
-
-                ctx.saveGState()
-                let rounded = CGPath(roundedRect: sourceRect,
-                                     cornerWidth: min(3, sourceRect.width * 0.25),
-                                     cornerHeight: min(3, sourceRect.height * 0.25),
-                                     transform: nil)
-                if isHovered {
-                    ctx.saveGState()
-                    ctx.setShadow(offset: .zero, blur: 6,
-                                  color: color.withAlphaComponent(0.32).cgColor)
-                    ctx.setStrokeColor(color.withAlphaComponent(0.55).cgColor)
-                    ctx.setLineWidth(2.4)
-                    ctx.addPath(rounded)
-                    ctx.strokePath()
-                    ctx.restoreGState()
-                }
-                ctx.setFillColor(fill.cgColor)
-                ctx.addPath(rounded)
-                ctx.fillPath()
-                ctx.setStrokeColor(stroke.cgColor)
-                ctx.setLineWidth(isHovered ? 1.6 : 1.1)
-                ctx.addPath(rounded)
-                ctx.strokePath()
-
-                // The port stays visible even when dense layouts hide the full leader lines.
-                let dotRadius = isHovered
-                    ? ConnectorStyle.sourceAnchorHoverRadius
-                    : ConnectorStyle.sourceAnchorRadius
-                let dot = CGPoint(x: sourceRect.maxX, y: sourceRect.midY)
-                ctx.setFillColor(color.withAlphaComponent(isHovered ? 0.95 : 0.55).cgColor)
-                ctx.fillEllipse(in: CGRect(x: dot.x - dotRadius, y: dot.y - dotRadius,
-                                           width: dotRadius * 2, height: dotRadius * 2))
-                ctx.restoreGState()
+                let state = SourceHighlightPainter.State(
+                    isHovered: view === hovered,
+                    anyHovered: anyHovered,
+                    isFailed: view.isFailed,
+                    isPrint: false
+                )
+                SourceHighlightPainter.draw(sourceRect, state: state, in: ctx)
             }
         }
 
@@ -1168,25 +1221,58 @@ final class SelectionOverlay: NSView {
 
     private func drawSidebarCards(in ctx: CGContext, dirtyRect: CGRect) {
         let sRect = sidebarRect
-        guard sRect.intersects(dirtyRect),
-              let store, pdfView?.document != nil, !store.annotations.isEmpty else { return }
+        guard let store, pdfView?.document != nil, !store.annotations.isEmpty else { return }
 
-        ctx.saveGState()
-        ctx.clip(to: sRect)
+        let ordered = store.annotations.compactMap { store.view(for: $0.id) }
+        let preferredScale = sidebarSharedScale()
+        let floatingView = zoomedAnnotation ?? hovered
+        let floatingLayout = floatingView.map { cardPresentation(for: $0, baseScale: preferredScale) }
+        let floatingIntersectsDirty = floatingLayout?.frame.insetBy(dx: -24, dy: -24).intersects(dirtyRect) ?? false
+        guard sRect.intersects(dirtyRect) || floatingIntersectsDirty else { return }
 
         let phase = Date().timeIntervalSinceReferenceDate
-        let ordered = store.annotations.compactMap { store.view(for: $0.id) }
-        let sortedForPaint = ordered.filter { $0 !== hovered } + ordered.filter { $0 === hovered }
-        for view in sortedForPaint {
-            let cardRect = view.bounds
-            guard !cardRect.isEmpty,
-                  cardRect.intersects(sRect),
-                  cardRect.insetBy(dx: -10, dy: -10).intersects(dirtyRect) else { continue }
-            drawCard(view, in: cardRect, isHovered: view === hovered,
-                     isDimmed: hovered != nil && view !== hovered, phase: phase, context: ctx)
+        func drawCard(_ view: TranslationAnnotation, rect: CGRect, scale: CGFloat) {
+            let state = SidebarCardPainter.State(
+                isHovered: view === hovered,
+                isDimmed: hovered != nil && view !== hovered,
+                isFailed: view.isFailed,
+                isPrint: false
+            )
+            SidebarCardPainter.draw(
+                view,
+                in: rect,
+                scale: scale,
+                state: state,
+                phase: phase,
+                context: ctx,
+                yDown: true
+            )
         }
 
-        ctx.restoreGState()
+        if sRect.intersects(dirtyRect) {
+            ctx.saveGState()
+            ctx.clip(to: sRect)
+            for view in ordered where view !== floatingView {
+                let cardRect = view.bounds
+                guard !cardRect.isEmpty,
+                      cardRect.intersects(sRect),
+                      cardRect.insetBy(dx: -10, dy: -10).intersects(dirtyRect) else { continue }
+                drawCard(view, rect: cardRect, scale: preferredScale)
+            }
+            ctx.restoreGState()
+        }
+
+        // Paint the active/zooming card last without the sidebar clip so it can float
+        // across the divider when compressed or narrow, while still clamped to `bounds`.
+        if let floatingView, let layout = floatingLayout,
+           !layout.frame.isEmpty,
+           layout.frame.intersects(bounds),
+           layout.frame.insetBy(dx: -24, dy: -24).intersects(dirtyRect) {
+            ctx.saveGState()
+            ctx.clip(to: bounds)
+            drawCard(floatingView, rect: layout.frame, scale: layout.scale)
+            ctx.restoreGState()
+        }
     }
 
     private func drawEmptySidebarHint(in sRect: CGRect) {
@@ -1209,7 +1295,7 @@ final class SelectionOverlay: NSView {
             height: cardHeight
         )
         let path = NSBezierPath(roundedRect: placeholder.insetBy(dx: 0.5, dy: 0.5),
-                                xRadius: 12, yRadius: 12)
+                                xRadius: 8, yRadius: 8)
         path.lineWidth = 1
         path.setLineDash([4, 4], count: 2, phase: 0)
         ReaderTheme.hintBorder.setStroke()
@@ -1223,81 +1309,6 @@ final class SelectionOverlay: NSView {
         attr.draw(in: drawRect)
     }
 
-    private func drawCard(_ view: TranslationAnnotation, in cardRect: CGRect, isHovered: Bool,
-                          isDimmed: Bool, phase: TimeInterval, context ctx: CGContext) {
-        ctx.saveGState()
-        let cornerRadius = min(SidebarCardStyle.cornerRadius,
-                               min(cardRect.width, cardRect.height) * 0.35)
-        let cardPath = CGPath(roundedRect: cardRect, cornerWidth: cornerRadius,
-                              cornerHeight: cornerRadius, transform: nil)
-
-        let rule: NSColor = view.isFailed ? ReaderTheme.inkError : ReaderTheme.inkAccent
-
-        if isHovered {
-            // Outer glow lives on the sidebar chrome; the card itself stays paper-white.
-            ctx.saveGState()
-            ctx.setShadow(offset: .zero, blur: 10, color: ReaderTheme.cardHoverGlow.cgColor)
-            ctx.setStrokeColor(ReaderTheme.chromeAccent.withAlphaComponent(0.62).cgColor)
-            ctx.setLineWidth(2)
-            ctx.addPath(cardPath)
-            ctx.strokePath()
-            ctx.restoreGState()
-        }
-
-        // Soft floating card shadow.
-        ctx.saveGState()
-        ctx.setShadow(
-            offset: CGSize(width: 0, height: isHovered ? 3 : 2),
-            blur: isHovered ? 12 : 8,
-            color: ReaderTheme.cardShadow.cgColor
-        )
-        ctx.setFillColor(ReaderTheme.cardPaper.cgColor)
-        ctx.addPath(cardPath)
-        ctx.fillPath()
-        ctx.restoreGState()
-
-        ctx.saveGState()
-        ctx.addPath(cardPath)
-        ctx.clip()
-
-        let contentRect = TranslationAnnotation.contentRect(for: cardRect)
-        let maxInnerWidth = max(
-            sidebarRect.width - 2 * CardSidebarLayout.cardHorizontalInset - 2 * TranslationAnnotation.cardInsetX,
-            TranslationAnnotation.minInnerWidth
-        )
-        let textScale = min(max(maxInnerWidth / TranslationAnnotation.defaultRenderWidth, 0.5), 1.0)
-        switch view.status {
-        case .loading:
-            drawSkeleton(in: contentRect, phase: phase, context: ctx)
-        case .done:
-            if let rendered = view.rendered {
-                rendered.draw(in: contentRect, context: ctx, yDown: true)
-            } else {
-                TranslationAnnotation.drawText(view.displayText, color: .black,
-                    in: contentRect, context: ctx, yDown: true, scale: textScale)
-            }
-        case .failed:
-            TranslationAnnotation.drawText(view.displayText, color: ReaderTheme.inkError,
-                in: contentRect, context: ctx, yDown: true, scale: textScale)
-        }
-
-        // Inset accent capsule: lighter and more refined than a full-height stripe.
-        let accentBar = SidebarCardStyle.accentBar(in: cardRect)
-        let accentRadius = accentBar.width * 0.5
-        ctx.setFillColor(rule.withAlphaComponent(isHovered ? 0.98 : isDimmed ? 0.42 : 0.65).cgColor)
-        ctx.addPath(CGPath(roundedRect: accentBar, cornerWidth: accentRadius,
-                           cornerHeight: accentRadius, transform: nil))
-        ctx.fillPath()
-        ctx.restoreGState()
-
-        // Card border.
-        ctx.setStrokeColor(rule.withAlphaComponent(isHovered ? 0.85 : isDimmed ? 0.12 : 0.22).cgColor)
-        ctx.setLineWidth(isHovered ? 1.25 : 0.8)
-        ctx.addPath(cardPath)
-        ctx.strokePath()
-        ctx.restoreGState()
-    }
-
     private func drawPendingConfirm() {
         guard let pendingPage, !pendingRect.isNull,
               let sel = overlayRect(original: pendingRect, page: pendingPage) else { return }
@@ -1308,27 +1319,27 @@ final class SelectionOverlay: NSView {
         ReaderTheme.selectionStroke.setStroke()
         let selPath = NSBezierPath(roundedRect: sel, xRadius: 2, yRadius: 2)
         selPath.lineWidth = 1
-        selPath.setLineDash([4, 3], count: 2, phase: 0)
         selPath.stroke()
 
         for (_, point) in pendingHandlePoints() {
-            let handle = NSBezierPath(ovalIn: CGRect(x: point.x - 3.75, y: point.y - 3.75,
-                                                     width: 7.5, height: 7.5))
+            let handle = NSBezierPath(roundedRect: CGRect(x: point.x - 3.5, y: point.y - 3.5,
+                                                         width: 7, height: 7),
+                                      xRadius: 1.5, yRadius: 1.5)
             ReaderTheme.handleFill.setFill()
             handle.fill()
             ReaderTheme.selectionStroke.setStroke()
-            handle.lineWidth = 1.2
+            handle.lineWidth = 1.0
             handle.stroke()
         }
         guard let chip = chipRects() else { return }
 
         let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.22)
-        shadow.shadowBlurRadius = 10
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.12)
+        shadow.shadowBlurRadius = 8
         shadow.shadowOffset = NSSize(width: 0, height: -2)
         NSGraphicsContext.current?.saveGraphicsState()
         shadow.set()
-        let chipPath = NSBezierPath(roundedRect: chip.frame, xRadius: 9, yRadius: 9)
+        let chipPath = NSBezierPath(roundedRect: chip.frame, xRadius: 8, yRadius: 8)
         ReaderTheme.chipSurface.setFill()
         chipPath.fill()
         NSGraphicsContext.current?.restoreGraphicsState()
@@ -1337,8 +1348,6 @@ final class SelectionOverlay: NSView {
         chipPath.stroke()
 
         let confirmPath = NSBezierPath(roundedRect: chip.confirm, xRadius: 6, yRadius: 6)
-        // Keep the filled button dark enough for its white label in both appearances;
-        // the brighter chrome accent is reserved for thin strokes and glows.
         let confirmColor = hoveredChipButton == 0
             ? ReaderTheme.inkAccentStrong
             : ReaderTheme.inkAccent
@@ -1348,7 +1357,7 @@ final class SelectionOverlay: NSView {
             NSColor.labelColor.withAlphaComponent(0.08).setFill()
             NSBezierPath(roundedRect: chip.cancel, xRadius: 6, yRadius: 6).fill()
         }
-        drawChipLabel("翻译 ↩", color: .white, in: chip.confirm)
+        drawChipLabel("翻译 ⏎", color: .white, in: chip.confirm)
         drawChipLabel("取消", color: .secondaryLabelColor, in: chip.cancel)
     }
 

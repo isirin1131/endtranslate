@@ -3,34 +3,119 @@ import PDFKit
 
 struct PageNavigationControls: View {
     @ObservedObject var model: PDFViewModel
+    @State private var isEditing = false
+    @State private var isHoveringField = false
+
+    private var digitCount: Int {
+        max(String(max(model.pageCount, 1)).count, 1)
+    }
+
+    private var fieldWidth: CGFloat {
+        CGFloat(digitCount) * 8.5 + 6
+    }
 
     var body: some View {
-        HStack(spacing: 7) {
-            Button { model.previousPage() } label: {
-                Image(systemName: "chevron.left")
+        HStack(spacing: 2) {
+            if model.pageCount > 1 {
+                ChevronButton(
+                    systemImage: "chevron.left",
+                    help: "上一页（⌥⌘←）",
+                    label: "上一页",
+                    disabled: !model.canGoToPreviousPage,
+                    action: model.previousPage
+                )
             }
-            .disabled(!model.canGoToPreviousPage)
-            .help("上一页（⌥⌘←）")
-            .accessibilityLabel("上一页")
 
-            PageNumberField(model: model)
-                .frame(width: 54)
-                .help("输入页码后按 Return 跳转（⌘L）")
-            Text("/ \(model.pageCount)")
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .fixedSize()
-                .accessibilityLabel("共 \(model.pageCount) 页")
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                PageNumberField(model: model) { editing in
+                    isEditing = editing
+                }
+                .frame(width: fieldWidth)
+                .fixedSize(horizontal: false, vertical: true)
 
-            Button { model.nextPage() } label: {
-                Image(systemName: "chevron.right")
+                Text("/ \(model.pageCount)")
+                    .font(.system(size: NSFont.systemFontSize).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                    .accessibilityLabel("共 \(model.pageCount) 页")
             }
-            .disabled(!model.canGoToNextPage)
-            .help("下一页（⌥⌘→）")
-            .accessibilityLabel("下一页")
+            .padding(.horizontal, model.pageCount > 1 ? 7 : 10)
+            .padding(.vertical, 3)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(fieldBackground)
+            }
+            .overlay {
+                if isEditing {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .strokeBorder(Color(nsColor: ReaderTheme.chromeAccent).opacity(0.65), lineWidth: 1)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .onHover { isHoveringField = $0 }
+            .onTapGesture {
+                if !isEditing {
+                    model.requestPageJump()
+                }
+            }
+            .help("点击或按 ⌘L 输入页码跳转")
+
+            if model.pageCount > 1 {
+                ChevronButton(
+                    systemImage: "chevron.right",
+                    help: "下一页（⌥⌘→）",
+                    label: "下一页",
+                    disabled: !model.canGoToNextPage,
+                    action: model.nextPage
+                )
+            }
         }
-        .buttonStyle(.borderless)
+        .padding(.horizontal, 2)
         .disabled(model.document == nil)
+    }
+
+    private var fieldBackground: Color {
+        if isEditing { return Color.primary.opacity(0.08) }
+        if isHoveringField { return Color.primary.opacity(0.05) }
+        return .clear
+    }
+}
+
+private struct ChevronButton: View {
+    let systemImage: String
+    let help: String
+    let label: String
+    let disabled: Bool
+    let action: () -> Void
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(disabled ? .quaternary : (isHovering ? .primary : .secondary))
+                .frame(width: 24, height: 24)
+                .background(
+                    Circle()
+                        .fill(isHovering && !disabled ? Color.primary.opacity(0.07) : .clear)
+                )
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .onHover { isHovering = $0 }
+        .help(help)
+        .accessibilityLabel(label)
+    }
+}
+
+private final class SeamlessPageField: NSTextField {
+    override func mouseDown(with event: NSEvent) {
+        let wasEditing = currentEditor() != nil
+        super.mouseDown(with: event)
+        if !wasEditing, let editor = currentEditor(), editor.selectedRange.length == 0 {
+            editor.selectAll(nil)
+        }
     }
 }
 
@@ -38,20 +123,28 @@ struct PageNavigationControls: View {
 /// SwiftUI FocusState does not always transfer keyboard focus across that boundary.
 private struct PageNumberField: NSViewRepresentable {
     @ObservedObject var model: PDFViewModel
+    var onEditingChange: (Bool) -> Void
 
-    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+    func makeCoordinator() -> Coordinator { Coordinator(model: model, onEditingChange: onEditingChange) }
 
     func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField()
-        field.bezelStyle = .roundedBezel
-        field.alignment = .center
-        field.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
-        field.placeholderString = "页码"
+        let field = SeamlessPageField()
+        field.isBezeled = false
+        field.isBordered = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.alignment = .right
+        field.font = .monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .medium)
+        field.textColor = .labelColor
+        field.usesSingleLineMode = true
+        field.lineBreakMode = .byClipping
+        field.cell?.isScrollable = true
         field.setAccessibilityLabel("页码")
         field.identifier = NSUserInterfaceItemIdentifier("page-number")
         field.delegate = context.coordinator
         field.target = context.coordinator
         field.action = #selector(Coordinator.submit(_:))
+        field.setContentHuggingPriority(.required, for: .vertical)
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return field
     }
@@ -59,10 +152,11 @@ private struct PageNumberField: NSViewRepresentable {
     func updateNSView(_ field: NSTextField, context: Context) {
         let coordinator = context.coordinator
         coordinator.model = model
+        coordinator.onEditingChange = onEditingChange
         field.isEnabled = model.document != nil
         if coordinator.document !== model.document {
             coordinator.document = model.document
-            coordinator.isEditing = false
+            coordinator.setEditing(false)
             if field.currentEditor() != nil { field.window?.makeFirstResponder(model.pdfView) }
         }
         if !coordinator.isEditing { field.stringValue = coordinator.pageNumber }
@@ -80,20 +174,31 @@ private struct PageNumberField: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var model: PDFViewModel
+        var onEditingChange: (Bool) -> Void
         weak var document: PDFDocument?
         var isEditing = false
         var lastJumpRequest: Int
         var pageNumber: String { String(model.pageCount == 0 ? 0 : model.currentPageIndex + 1) }
 
-        init(model: PDFViewModel) {
+        init(model: PDFViewModel, onEditingChange: @escaping (Bool) -> Void) {
             self.model = model
+            self.onEditingChange = onEditingChange
             self.lastJumpRequest = model.pageJumpRequest
         }
 
-        func controlTextDidBeginEditing(_ notification: Notification) { isEditing = true }
+        func setEditing(_ editing: Bool) {
+            guard isEditing != editing else { return }
+            isEditing = editing
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.onEditingChange(self.isEditing)
+            }
+        }
+
+        func controlTextDidBeginEditing(_ notification: Notification) { setEditing(true) }
 
         func controlTextDidEndEditing(_ notification: Notification) {
-            isEditing = false
+            setEditing(false)
             (notification.object as? NSTextField)?.stringValue = pageNumber
         }
 
@@ -102,7 +207,7 @@ private struct PageNumberField: NSViewRepresentable {
                 sender.selectText(nil)
                 return
             }
-            isEditing = false
+            setEditing(false)
             sender.stringValue = pageNumber
             sender.window?.makeFirstResponder(model.pdfView)
         }
@@ -114,7 +219,7 @@ private struct PageNumberField: NSViewRepresentable {
                 return true
             }
             guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
-            isEditing = false
+            setEditing(false)
             (control as? NSTextField)?.stringValue = pageNumber
             control.window?.makeFirstResponder(model.pdfView)
             return true
@@ -128,14 +233,13 @@ struct PDFOutlineSidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("目录").font(.headline)
+                Text("目录")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
                 Spacer()
-                Button { model.toggleOutline() } label: { Image(systemName: "sidebar.left") }
-                    .buttonStyle(.borderless)
-                    .help("收起目录（⌥⌘1）")
-                    .accessibilityLabel("收起目录")
             }
-            .padding(12)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
             Divider()
             if model.outline.isEmpty {
                 VStack(spacing: 10) {
@@ -167,7 +271,7 @@ struct PDFOutlineSidebar: View {
                     .disabled(entry.target == nil)
                     .help(entry.title)
                     .listRowBackground(model.selectedOutlineID == entry.id
-                        ? Color(nsColor: ReaderTheme.chromeAccent).opacity(0.14)
+                        ? Color(nsColor: ReaderTheme.chromeAccent).opacity(0.10)
                         : Color.clear)
                 }
                 .listStyle(.sidebar)

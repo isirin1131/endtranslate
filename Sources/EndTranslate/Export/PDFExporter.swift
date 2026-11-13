@@ -108,12 +108,30 @@ enum PDFExporter {
                 for placed in layout.cards {
                     guard let overlay = byID[placed.id] else { continue }
                     overlay.bounds = placed.frame
-                    drawSourceHighlight(overlay.model.rect, in: context)
+                    SourceHighlightPainter.draw(overlay.model.rect, state: .init(isPrint: true), in: context)
                     drawConnector(sourceRect: overlay.model.rect, cardRect: placed.frame, pageBox: pageBox, in: context)
                 }
+                let renderedCards: [(RenderedTranslation, CGRect)] = layout.cards.compactMap { placed in
+                    guard let overlay = byID[placed.id], let rendered = overlay.rendered else { return nil }
+                    return (rendered, placed.frame)
+                }
+                let pageScale = SidebarCardPainter.sharedScale(for: renderedCards)
                 for placed in layout.cards {
                     guard let overlay = byID[placed.id] else { continue }
-                    drawCard(overlay, in: placed.frame, context: context)
+                    let state = SidebarCardPainter.State(
+                        isHovered: false,
+                        isDimmed: false,
+                        isFailed: overlay.isFailed,
+                        isPrint: true
+                    )
+                    SidebarCardPainter.draw(
+                        overlay,
+                        in: placed.frame,
+                        scale: pageScale,
+                        state: state,
+                        context: context,
+                        yDown: false
+                    )
                 }
                 for placed in layout.cards {
                     guard let overlay = byID[placed.id] else { continue }
@@ -146,24 +164,6 @@ enum PDFExporter {
         context.restoreGState()
     }
 
-    private static func drawSourceHighlight(_ rect: CGRect, in context: CGContext) {
-        context.saveGState()
-        let path = CGPath(
-            roundedRect: rect,
-            cornerWidth: min(3, rect.width * 0.25),
-            cornerHeight: min(3, rect.height * 0.25),
-            transform: nil
-        )
-        context.setFillColor(ReaderTheme.sourceFill.cgColor)
-        context.addPath(path)
-        context.fillPath()
-        context.setStrokeColor(ReaderTheme.sourceStroke.cgColor)
-        context.setLineWidth(1.0)
-        context.addPath(path)
-        context.strokePath()
-        context.restoreGState()
-    }
-
     private static func drawConnector(sourceRect: CGRect, cardRect: CGRect, pageBox: CGRect, in context: CGContext) {
         let connector = CardConnector(
             sourceRect: sourceRect,
@@ -188,62 +188,13 @@ enum PDFExporter {
             minSourceX: pageBox.minX + 4,
             maxSourceX: pageBox.maxX - 4
         )
-        let radius: CGFloat = 1.8
+        let radius: CGFloat = 1.6
         context.saveGState()
-        context.setFillColor(ReaderTheme.inkAccent.withAlphaComponent(0.62).cgColor)
+        context.setFillColor(ReaderTheme.inkAccent.withAlphaComponent(0.70).cgColor)
         for point in [connector.start, connector.end] {
             context.fillEllipse(in: CGRect(x: point.x - radius, y: point.y - radius,
                                            width: radius * 2, height: radius * 2))
         }
         context.restoreGState()
-    }
-
-    private static func drawCard(_ overlay: TranslationAnnotation, in cardRect: CGRect, context: CGContext) {
-        context.saveGState()
-        let radius = min(SidebarCardStyle.cornerRadius,
-                         min(cardRect.width, cardRect.height) * 0.35)
-        let cardPath = CGPath(roundedRect: cardRect, cornerWidth: radius, cornerHeight: radius, transform: nil)
-        context.setFillColor(ReaderTheme.cardPaper.cgColor)
-        context.addPath(cardPath)
-        context.fillPath()
-
-        context.saveGState()
-        ctxClipAndDrawContent(overlay, cardRect: cardRect, cardPath: cardPath, context: context)
-        context.restoreGState()
-
-        context.setStrokeColor(ReaderTheme.printCardBorder.cgColor)
-        context.setLineWidth(0.8)
-        context.addPath(cardPath)
-        context.strokePath()
-        context.restoreGState()
-    }
-
-    private static func ctxClipAndDrawContent(
-        _ overlay: TranslationAnnotation,
-        cardRect: CGRect,
-        cardPath: CGPath,
-        context: CGContext
-    ) {
-        context.addPath(cardPath)
-        context.clip()
-
-        let contentRect = TranslationAnnotation.contentRect(for: cardRect)
-        let maxInnerWidth = max(
-            sidebarWidth - 2 * CardSidebarLayout.cardHorizontalInset - 2 * TranslationAnnotation.cardInsetX,
-            TranslationAnnotation.minInnerWidth
-        )
-        let textScale = min(max(maxInnerWidth / TranslationAnnotation.defaultRenderWidth, 0.5), 1.0)
-        if let rendered = overlay.rendered {
-            rendered.draw(in: contentRect, context: context)
-        } else {
-            let text = overlay.fallbackText ?? MarkdownText.plainText(overlay.model.translationMd)
-            TranslationAnnotation.drawText(text, color: .black, in: contentRect, context: context, scale: textScale)
-        }
-        let accentBar = SidebarCardStyle.accentBar(in: cardRect)
-        let accentRadius = accentBar.width * 0.5
-        context.setFillColor(ReaderTheme.inkAccent.withAlphaComponent(0.65).cgColor)
-        context.addPath(CGPath(roundedRect: accentBar, cornerWidth: accentRadius,
-                               cornerHeight: accentRadius, transform: nil))
-        context.fillPath()
     }
 }

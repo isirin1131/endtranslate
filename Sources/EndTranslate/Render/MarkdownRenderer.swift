@@ -23,7 +23,7 @@ enum MarkdownRenderError: LocalizedError {
 final class MarkdownRenderer: NSObject, WKNavigationDelegate {
     static let shared = MarkdownRenderer()
     // Bump after changing the renderer, CSS, or bundled libraries.
-    private static let cacheVersion = 2
+    private static let cacheVersion = 3
     private static let memoryLimit = 32 * 1024 * 1024
 
     private struct Job {
@@ -260,6 +260,7 @@ final class MarkdownRenderer: NSObject, WKNavigationDelegate {
         configuration.websiteDataStore = .nonPersistent()
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
         let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 300, height: 100), configuration: configuration)
+        view.setValue(false, forKey: "drawsBackground")
         view.appearance = NSAppearance(named: .aqua)
         view.navigationDelegate = self
         webView = view

@@ -179,21 +179,13 @@ final class LayoutSnapshotTests {
 
             // Source highlights + anchor dots.
             for (index, input) in scenario.cards.enumerated() {
-                let isHovered = ids[index] == hoveredID
-                let color = ReaderTheme.inkAccent
-                let path = CGPath(roundedRect: input.source, cornerWidth: 3, cornerHeight: 3, transform: nil)
-                ctx.setFillColor((isHovered ? ReaderTheme.sourceFillHover : ReaderTheme.sourceFill).cgColor)
-                ctx.addPath(path)
-                ctx.fillPath()
-                ctx.setStrokeColor((isHovered ? ReaderTheme.sourceStrokeHover : ReaderTheme.sourceStroke).cgColor)
-                ctx.setLineWidth(isHovered ? 1.6 : 1.1)
-                ctx.addPath(path)
-                ctx.strokePath()
-                let radius = isHovered ? ConnectorStyle.sourceAnchorHoverRadius : ConnectorStyle.sourceAnchorRadius
-                let dot = CGPoint(x: input.source.maxX, y: input.source.midY)
-                ctx.setFillColor(color.withAlphaComponent(isHovered ? 0.95 : 0.55).cgColor)
-                ctx.fillEllipse(in: CGRect(x: dot.x - radius, y: dot.y - radius,
-                                           width: radius * 2, height: radius * 2))
+                let state = SourceHighlightPainter.State(
+                    isHovered: ids[index] == hoveredID,
+                    anyHovered: hoveredID != nil,
+                    isFailed: false,
+                    isPrint: false
+                )
+                SourceHighlightPainter.draw(input.source, state: state, in: ctx)
             }
 
             // Idle connectors follow the production visibility policy.
@@ -227,12 +219,28 @@ final class LayoutSnapshotTests {
             let orderedCards = placed.sorted {
                 ($0.id == hoveredID ? 1 : 0, $0.frame.minY) < ($1.id == hoveredID ? 1 : 0, $1.frame.minY)
             }
+            let renderedList: [(RenderedTranslation, CGRect)] = orderedCards.compactMap { card in
+                guard let note = notes[card.id], let rendered = note.rendered else { return nil }
+                return (rendered, card.frame)
+            }
+            let sharedScale = SidebarCardPainter.sharedScale(for: renderedList)
+
             for placedCard in orderedCards {
                 guard let note = notes[placedCard.id] else { continue }
-                drawCard(note, frame: placedCard.frame,
-                         isHovered: placedCard.id == hoveredID,
-                         isDimmed: hoveredID != nil && placedCard.id != hoveredID,
-                         in: ctx)
+                let state = SidebarCardPainter.State(
+                    isHovered: placedCard.id == hoveredID,
+                    isDimmed: hoveredID != nil && placedCard.id != hoveredID,
+                    isFailed: false,
+                    isPrint: false
+                )
+                SidebarCardPainter.draw(
+                    note,
+                    in: placedCard.frame,
+                    scale: sharedScale,
+                    state: state,
+                    context: ctx,
+                    yDown: true
+                )
             }
 
             if let hoveredID, let frame = byID[hoveredID]?.frame,
@@ -242,10 +250,6 @@ final class LayoutSnapshotTests {
                                               minSourceX: 46, maxSourceX: pdfWidth - 46)
                 ctx.saveGState()
                 ctx.setLineCap(.round)
-                ctx.setStrokeColor(ReaderTheme.inkAccent.withAlphaComponent(0.14).cgColor)
-                ctx.setLineWidth(ConnectorStyle.activeHaloWidth)
-                connector.addPath(to: ctx)
-                ctx.strokePath()
                 ctx.setStrokeColor(ReaderTheme.inkAccent.withAlphaComponent(0.92).cgColor)
                 ctx.setLineWidth(ConnectorStyle.activeLineWidth)
                 connector.addPath(to: ctx)
@@ -262,54 +266,5 @@ final class LayoutSnapshotTests {
             png = rep.representation(using: .png, properties: [:])
         }
         return try #require(png)
-    }
-
-    private func drawCard(_ note: TranslationAnnotation, frame: CGRect,
-                          isHovered: Bool, isDimmed: Bool, in ctx: CGContext) {
-        let radius = min(SidebarCardStyle.cornerRadius, min(frame.width, frame.height) * 0.35)
-        let path = CGPath(roundedRect: frame, cornerWidth: radius, cornerHeight: radius, transform: nil)
-
-        if isHovered {
-            ctx.saveGState()
-            ctx.setShadow(offset: .zero, blur: 10, color: ReaderTheme.cardHoverGlow.cgColor)
-            ctx.setStrokeColor(ReaderTheme.chromeAccent.withAlphaComponent(0.62).cgColor)
-            ctx.setLineWidth(2)
-            ctx.addPath(path)
-            ctx.strokePath()
-            ctx.restoreGState()
-        }
-
-        ctx.saveGState()
-        ctx.setShadow(offset: CGSize(width: 0, height: isHovered ? 3 : 2),
-                      blur: isHovered ? 12 : 8, color: ReaderTheme.cardShadow.cgColor)
-        ctx.setFillColor(ReaderTheme.cardPaper.cgColor)
-        ctx.addPath(path)
-        ctx.fillPath()
-        ctx.restoreGState()
-
-        ctx.saveGState()
-        ctx.addPath(path)
-        ctx.clip()
-        let content = TranslationAnnotation.contentRect(for: frame)
-        if let rendered = note.rendered {
-            rendered.draw(in: content, context: ctx, yDown: true)
-        } else {
-            TranslationAnnotation.drawText(note.displayText, color: .black, in: content,
-                                           context: ctx, yDown: true, scale: 1)
-        }
-        let accentBar = SidebarCardStyle.accentBar(in: frame)
-        let accentRadius = accentBar.width * 0.5
-        ctx.setFillColor(ReaderTheme.inkAccent
-            .withAlphaComponent(isHovered ? 0.98 : isDimmed ? 0.42 : 0.65).cgColor)
-        ctx.addPath(CGPath(roundedRect: accentBar, cornerWidth: accentRadius,
-                           cornerHeight: accentRadius, transform: nil))
-        ctx.fillPath()
-        ctx.restoreGState()
-
-        ctx.setStrokeColor(ReaderTheme.inkAccent
-            .withAlphaComponent(isHovered ? 0.85 : isDimmed ? 0.12 : 0.22).cgColor)
-        ctx.setLineWidth(isHovered ? 1.25 : 0.8)
-        ctx.addPath(path)
-        ctx.strokePath()
     }
 }

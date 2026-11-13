@@ -16,6 +16,7 @@ struct AnnotationEditorView: View {
     @State private var preview: NSImage?
     @State private var previewError: String?
     @State private var rendering = false
+    @State private var showingHelp = false
     private var width: CGFloat { min(max(session.previewWidth, 180), 460) }
 
     init(session: AnnotationEditSession, model: PDFViewModel) {
@@ -26,13 +27,28 @@ struct AnnotationEditorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("编辑译文 — 第 \(session.pageIndex + 1) 页")
                     .font(.headline)
+                Button {
+                    showingHelp.toggle()
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("排版语法帮助")
+                .popover(isPresented: $showingHelp) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("排版支持").font(.headline)
+                        Text("• 行内公式：$x^2$ 或 \\(x^2\\)")
+                        Text("• 独立公式：$$\\int_0^1 x\\,dx$$")
+                        Text("• 标准 Markdown：**粗体**、*斜体*、列表、表格")
+                    }
+                    .font(.callout)
+                    .padding(14)
+                }
                 Spacer()
-                Text(verbatim: "支持 Markdown 与 LaTeX：$x^2$ / $$\\int_0^1 x\\,dx$$")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -45,7 +61,7 @@ struct AnnotationEditorView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     TextEditor(text: $draft)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.system(size: 13, design: .monospaced))
                         .frame(minWidth: 300)
                 }
                 .padding(10)
@@ -69,9 +85,12 @@ struct AnnotationEditorView: View {
                                     .aspectRatio(contentMode: .fit)
                                     .frame(maxWidth: width)
                                     .background(Color(nsColor: ReaderTheme.cardPaper))
-                                    .overlay(Rectangle()
-                                        .stroke(Color(nsColor: ReaderTheme.cardBorder), lineWidth: 0.5))
-                                    .shadow(color: .black.opacity(0.10), radius: 8, y: 2)
+                                    .clipShape(RoundedRectangle(cornerRadius: SidebarCardStyle.cornerRadius))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: SidebarCardStyle.cornerRadius)
+                                            .strokeBorder(Color(nsColor: ReaderTheme.cardStroke), lineWidth: 0.5)
+                                    )
+                                    .shadow(color: Color(nsColor: ReaderTheme.cardShadow), radius: 6, y: 1.5)
                             } else if let previewError {
                                 Text(previewError)
                                     .font(.caption)
@@ -81,7 +100,9 @@ struct AnnotationEditorView: View {
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
                     }
+                    .background(Color(nsColor: ReaderTheme.sidebarSurface))
                 }
                 .padding(10)
             }

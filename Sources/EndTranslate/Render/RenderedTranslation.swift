@@ -3,9 +3,9 @@ import CoreGraphics
 
 /// A single vector PDF, shared by the reader, editor preview, and PDF export.
 final class RenderedTranslation: @unchecked Sendable {
-    /// Largest uniform scale used when fitting the vector into a card. With the 13pt
-    /// base render font this caps the displayed text at roughly 16pt.
-    static let maxContentScale: CGFloat = 1.25
+    /// Largest uniform scale used when fitting the vector into a card. Capped at 1.0
+    /// so short chips stay crisp at the native 13pt base font rather than blowing up.
+    static let maxContentScale: CGFloat = 1.0
 
     let pdfData: Data
     let size: CGSize
@@ -21,27 +21,34 @@ final class RenderedTranslation: @unchecked Sendable {
         guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return nil }
     }
 
+    /// The maximum uniform scale that fits this vector inside the target rect, capped at `maxScale`.
+    func fitScale(in rect: CGRect, maxScale: CGFloat = RenderedTranslation.maxContentScale) -> CGFloat {
+        guard rect.width > 0, rect.height > 0, size.width > 0, size.height > 0 else { return 1.0 }
+        let scale = min(rect.width / size.width, rect.height / size.height, maxScale)
+        return (scale.isFinite && scale > 0) ? scale : 1.0
+    }
+
     /// PDF and export contexts are y-up; the screen overlay is y-down.
     ///
-    /// The card frame is resized by the viewport layout solver, so drawing must preserve the
-    /// rendered page's aspect ratio: use the tighter of the width/height ratios, cap comfort
-    /// enlargement at 1.45x, center vertically, and only center short labels horizontally.
-    func draw(in rect: CGRect, context: CGContext, yDown: Bool = false) {
+    /// Preserves aspect ratio, vertically centers within the card, and aligns to the left
+    /// edge so the reading start point is consistent across single-line chips and paragraphs.
+    func draw(
+        in rect: CGRect,
+        context: CGContext,
+        yDown: Bool = false,
+        scale preferred: CGFloat? = nil,
+        maxScale: CGFloat = RenderedTranslation.maxContentScale
+    ) {
         guard let page = document.page(at: 1) else { return }
         guard rect.width.isFinite, rect.height.isFinite, rect.width > 0, rect.height > 0 else { return }
         let box = page.getBoxRect(.mediaBox)
         guard box.width > 0, box.height > 0 else { return }
-        let scale = min(rect.width / box.width, rect.height / box.height, Self.maxContentScale)
+        let naturalScale = fitScale(in: rect, maxScale: maxScale)
+        let scale = min(preferred ?? naturalScale, naturalScale)
         guard scale.isFinite, scale > 0 else { return }
-        let drawWidth = box.width * scale
         let drawHeight = box.height * scale
         let yOffset = (rect.height - drawHeight) * 0.5
-        let xOffset: CGFloat
-        if box.width < rect.width * 0.75 && box.height < 28 {
-            xOffset = (rect.width - drawWidth) * 0.5
-        } else {
-            xOffset = 0
-        }
+        let xOffset: CGFloat = 0
 
         context.saveGState()
         context.clip(to: rect)

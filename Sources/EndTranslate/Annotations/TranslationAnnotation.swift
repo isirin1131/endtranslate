@@ -4,9 +4,10 @@ import CoreText
 /// Shared visual constants for floating sidebar cards, so screen and PDF export stay
 /// identical while the chrome can be tuned in one place.
 enum SidebarCardStyle {
-    static let cornerRadius: CGFloat = 10
-    static let accentBarWidth: CGFloat = 3
-    static let accentBarInset: CGFloat = 9
+    static let cornerRadius: CGFloat = 8
+    static let accentBarWidth: CGFloat = 2
+    static let accentBarInset: CGFloat = 8
+    static let accentBarMinHeight: CGFloat = 44
 
     /// Rounded accent capsule inset from the card's top and bottom edges.
     static func accentBar(in cardRect: CGRect) -> CGRect {
@@ -64,7 +65,7 @@ final class TranslationAnnotation {
         switch status {
         case .loading: return "翻译中…"
         case .failed(let message): return "翻译失败：\(message)\n点击重试"
-        case .done: return fallbackText ?? model.translationMd
+        case .done: return fallbackText ?? MarkdownText.plainText(model.translationMd)
         }
     }
 
@@ -246,7 +247,7 @@ final class TranslationAnnotation {
               rect.width > 0, rect.height > 0 else { return }
         let logicalRect = CGRect(x: 0, y: 0, width: rect.width / scale, height: rect.height / scale)
         let minimumFont: CGFloat = 5.5
-        let maximumFont: CGFloat = 15.5
+        let maximumFont: CGFloat = 13.5
 
         func measuredSize(at fontSize: CGFloat) -> CGSize {
             let attrString = NSAttributedString(string: text, attributes: [
@@ -289,16 +290,9 @@ final class TranslationAnnotation {
         ])
         let framesetter = CTFramesetterCreateWithAttributedString(attrString)
         let fitHeight = fitSize.height.isFinite ? fitSize.height : 0
-        let fitWidth = fitSize.width.isFinite ? fitSize.width : logicalRect.width
         let verticalOffset = max(0, (logicalRect.height - fitHeight) * 0.5)
-        // A short single-line label centered in a stretched full-width row reads as an
-        // intentional pill instead of a lonely word hugging the left accent bar.
-        let horizontalOffset: CGFloat
-        if fitWidth <= logicalRect.width * 0.75, fitHeight <= 28 {
-            horizontalOffset = max(0, (logicalRect.width - fitWidth) * 0.5)
-        } else {
-            horizontalOffset = 0
-        }
+        // Keep reading start point aligned with multi-line cards
+        let horizontalOffset: CGFloat = 0
 
         context.saveGState()
         context.translateBy(x: rect.minX, y: yDown ? rect.maxY : rect.minY)

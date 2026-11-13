@@ -18,7 +18,6 @@ struct ContentView: View {
                 .frame(minWidth: 380, maxWidth: .infinity, maxHeight: .infinity)
         }
             .navigationTitle(model.document == nil ? "EndTranslate" : model.fileName)
-            .navigationSubtitle(model.pageLabel)
             .toolbar { toolbar }
             .sheet(item: $model.editing) { session in
                 AnnotationEditorView(session: session, model: model)
@@ -83,8 +82,10 @@ struct ContentView: View {
             .help("显示或收起目录（⌥⌘1）")
             .disabled(model.document == nil)
         }
-        ToolbarItem(placement: .principal) {
-            PageNavigationControls(model: model)
+        if model.document != nil {
+            ToolbarItem(placement: .principal) {
+                PageNavigationControls(model: model)
+            }
         }
         ToolbarItemGroup(placement: .primaryAction) {
             ControlGroup {
@@ -98,7 +99,11 @@ struct ContentView: View {
                 .help("放大（⌘=）")
             }
             .disabled(model.document == nil)
-
+        }
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+        }
+        ToolbarItemGroup(placement: .primaryAction) {
             Button { model.exportAnnotatedPDF() } label: {
                 Label("导出", systemImage: "square.and.arrow.up")
             }
@@ -120,23 +125,19 @@ private struct EmptyStateView: View {
     @State private var dropTargeted = false
 
     var body: some View {
-        VStack(spacing: 22) {
-            ZStack {
-                Circle()
-                    .fill(Color(nsColor: ReaderTheme.chromeAccent).opacity(0.10))
-                    .frame(width: 96, height: 96)
-                Image(systemName: "text.viewfinder")
-                    .font(.system(size: 44, weight: .thin))
-                    .foregroundStyle(dropTargeted
-                        ? Color(nsColor: ReaderTheme.chromeAccent)
-                        : Color.secondary)
-                    .symbolEffect(.bounce, value: dropTargeted)
-            }
+        VStack(spacing: 24) {
+            Image(systemName: "text.viewfinder")
+                .font(.system(size: 52, weight: .ultraLight))
+                .foregroundStyle(dropTargeted
+                    ? Color(nsColor: ReaderTheme.chromeAccent)
+                    : Color.secondary.opacity(0.8))
+                .symbolEffect(.bounce, value: dropTargeted)
 
             VStack(spacing: 6) {
                 Text("拖入 PDF 开始阅读")
                     .font(.title2.weight(.semibold))
                 Text("在页面上框选任意段落，译文卡片将显示在右侧栏并与原文连线")
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             }
 
@@ -147,14 +148,6 @@ private struct EmptyStateView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-
-            HStack(spacing: 18) {
-                Tip(symbol: "rectangle.dashed", text: "框选 → 调整 → 确认")
-                Tip(symbol: "point.topleft.down.curvedto.point.bottomright.up", text: "侧栏卡片随原文同步滚动")
-                Tip(symbol: "cursorarrow.click.2", text: "双击编辑译文")
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
 
             if !settings.isConfigured {
                 SettingsLink {
@@ -175,25 +168,16 @@ private struct EmptyStateView: View {
                     }
                 }
                 .frame(width: 360)
-                .padding(.top, 6)
+                .padding(.top, 8)
             }
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            LinearGradient(
-                colors: [
-                    Color(nsColor: ReaderTheme.sidebarTop),
-                    Color(nsColor: ReaderTheme.sidebarBottom)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        )
+        .background(Color(nsColor: .windowBackgroundColor))
         .overlay {
             if dropTargeted {
                 RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color(nsColor: ReaderTheme.chromeAccent), lineWidth: 3)
+                    .strokeBorder(Color(nsColor: ReaderTheme.chromeAccent), lineWidth: 2)
                     .padding(8)
                     .allowsHitTesting(false)
             }
@@ -205,18 +189,6 @@ private struct EmptyStateView: View {
                 Task { @MainActor in model.open(url: url) }
             }
             return true
-        }
-    }
-}
-
-private struct Tip: View {
-    let symbol: String
-    let text: String
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: symbol)
-            Text(text)
         }
     }
 }
@@ -300,7 +272,7 @@ private struct StatusPill: View {
             if let error = model.saveError {
                 HStack(spacing: 8) {
                     Label("译注尚未保存，请检查文件夹权限和剩余空间", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(Color(nsColor: ReaderTheme.warning))
                         .lineLimit(2)
                     Button("重试保存") { model.saveNow() }
                         .buttonStyle(.link)
@@ -310,7 +282,7 @@ private struct StatusPill: View {
             } else if let toast = model.toast {
                 HStack(spacing: 8) {
                     Image(systemName: toast.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(toast.isError ? Color.orange : Color.green)
+                        .foregroundStyle(toast.isError ? Color(nsColor: ReaderTheme.warning) : Color(nsColor: ReaderTheme.success))
                     Text(toast.message)
                         .lineLimit(2)
                     if let title = toast.actionTitle {
@@ -350,10 +322,10 @@ private extension View {
         self
             .font(.callout)
             .padding(.horizontal, 14)
-            .padding(.vertical, 8)
+            .padding(.vertical, 7)
             .background(.regularMaterial, in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5))
-            .shadow(color: .black.opacity(0.15), radius: 10, y: 3)
+            .overlay(Capsule().strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.08), radius: 8, y: 2)
             .frame(maxWidth: 560)
     }
 }
